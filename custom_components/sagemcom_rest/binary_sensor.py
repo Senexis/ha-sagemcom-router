@@ -21,7 +21,9 @@ from .coordinator import RouterData
 from .entity import (
     SagemcomClientEntity,
     SagemcomEntity,
+    SagemcomExtenderEntity,
     async_add_client_entities,
+    async_add_extender_entities,
     async_remove_stale_entities,
     client_blocked,
     controls_enabled,
@@ -131,8 +133,44 @@ async def async_setup_entry(
         hass,
         entry,
         "binary_sensor",
-        lambda uid: uid in wanted if uid.startswith(prefix) else not controls,
+        lambda uid: (
+            uid in wanted
+            if uid.startswith(prefix)
+            # Client "Internet blocked" twins exist only while controls are off.
+            else not (controls and uid.endswith("_blocked"))
+        ),
     )
+    async_add_extender_entities(
+        hass,
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda c, node_id, via: [ExtenderConnectedSensor(c, node_id, via)],
+    )
+
+
+class ExtenderConnectedSensor(SagemcomExtenderEntity, BinarySensorEntity):
+    """Whether the mesh extender is currently part of the mesh."""
+
+    _attr_name = "Connected"
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+
+    def __init__(self, coordinator, node_id: str, via: str | None) -> None:
+        super().__init__(coordinator, node_id, "connected", via)
+
+    @property
+    def available(self) -> bool:
+        # Leaving the mesh is the "off" state, not "unavailable".
+        return self.coordinator.last_update_success
+
+    @property
+    def is_on(self) -> bool:
+        return self.node is not None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        node = self.node or {}
+        return {k: node.get(k) for k in ("ipv4", "backhaul_quality") if node.get(k)}
 
 
 class ClientBlockedSensor(SagemcomClientEntity, BinarySensorEntity):

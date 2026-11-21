@@ -31,6 +31,13 @@ The router and its network clients are shown in separate groups ("Router" and
   port it sits behind, DHCP/static, DHCP reservation, router's device-type guess.
   Optional per-client sensors (disabled by default): connection, signal strength,
   link speed.
+- **New client** event entity: fires once for every client the integration hasn't
+  seen before (also for clients that joined while HA was down), with mac, name,
+  hostname, ip, connection, band and network (main/guest). Use it as an automation
+  trigger, e.g. to notify about unknown devices.
+- **Mesh extenders** get their own device (connected via the router) with
+  Connected, Wi-Fi clients, Backhaul and Last boot (disabled by default). Built
+  from the API format only; not yet verified on a real extender.
 - Diagnostics download (redacted).
 
 Technical sensors (CPU, memory, temperature, NAT table, firmware, network
@@ -74,6 +81,14 @@ not exposed.
 - Writes use flat form-encoded bodies (like the web UI), booleans as `true`/`false`,
   guest SSID `enable` as `1`/`0`. Reads stay GET-only. The client logs out on
   unload, because the router has a limited number of web sessions.
+
+Host, username, password and SSL verification can be changed later with
+**Reconfigure** on the integration page (it refuses a different router).
+
+## Development
+`pip install -r requirements_test.txt && python -m pytest` runs the tests for the
+API client and the parser. They use synthetic router data (`tests/router_data.py`)
+and small stand-ins for Home Assistant, so no HA install is needed.
 
 ## Releasing
 Bump `version` in `custom_components/sagemcom_rest/manifest.json`, commit, then

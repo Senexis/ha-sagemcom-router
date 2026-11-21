@@ -96,6 +96,36 @@ class SagemcomRestConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Change host, credentials or SSL verification of the configured router."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            data = {**entry.data, **user_input}
+            errors, info = await self._validate(data)
+            if not errors:
+                # Refuse to silently switch the entry over to a different router.
+                await self.async_set_unique_id(info.get("serialNumber") or data[CONF_HOST])
+                self._abort_if_unique_id_mismatch(reason="wrong_router")
+                return self.async_update_reload_and_abort(entry, data=data)
+        current = {**entry.data, **(user_input or {})}
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=current[CONF_HOST]): str,
+                    vol.Required(CONF_USERNAME, default=current[CONF_USERNAME]): str,
+                    vol.Required(CONF_PASSWORD): str,
+                    vol.Optional(
+                        CONF_VERIFY_SSL, default=current.get(CONF_VERIFY_SSL, False)
+                    ): bool,
+                }
+            ),
+            errors=errors,
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(config_entry) -> OptionsFlow:

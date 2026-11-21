@@ -12,6 +12,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -54,6 +55,21 @@ def _slow_paths() -> dict[str, str]:
 
 SLOW_PATHS = _slow_paths()
 MESH_V4 = "/api/v4/easymesh/meshdevices"
+
+
+def detect_new_clients(
+    known: set[str] | None, current: set[str], registered: set[str]
+) -> tuple[set[str], set[str]]:
+    """Return (new MACs, updated known set).
+
+    First run (known is None): every client that already has a device in HA counts
+    as known. On a fresh install (no devices yet) everything is known, so nothing
+    is announced; otherwise clients that joined while HA was down are reported.
+    """
+    if known is None:
+        known = set(registered) if registered else set(current)
+    new = current - known
+    return new, known | new
 
 
 def _kbit_to_mbit(value: Any) -> float | None:
@@ -101,6 +117,8 @@ class RouterData:
     hosts: dict[str, dict[str, Any]] = field(default_factory=dict)
     mesh_nodes: list[dict[str, Any]] = field(default_factory=list)
     misc: dict[str, Any] = field(default_factory=dict)
+    # Clients that joined since the last refresh (see detect_new_clients).
+    new_clients: list[dict[str, Any]] = field(default_factory=list)
     # State behind the control entities (LED, parental control).
     controls: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)  # for diagnostics
@@ -131,6 +149,7 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         self._slow_next = 0.0
         self._slow_task: asyncio.Task[None] | None = None
         self._refetched_at: dict[str, float] = {}
+        self._known_clients: set[str] | None = None
         self.platforms: list[str] = []  # set up by async_setup_entry
         self._prev_counters: tuple[float, int, int] | None = None
 
@@ -150,13 +169,25 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
 
     async def _async_update_data(self) -> RouterData:
         try:
-            return await self._update()
+            data = await self._update()
         except SagemcomAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except SagemcomConnectionError as err:
             raise UpdateFailed(f"Router unreachable: {err}") from err
         except SagemcomError as err:
             raise UpdateFailed(str(err)) from err
+        registered: set[str] = set()
+        if self._known_clients is None:
+            registry = dr.async_get(self.hass)
+            for device in dr.async_entries_for_config_entry(registry, self.config_entry.entry_id):
+                registered.update(
+                    value for kind, value in device.connections if kind == dr.CONNECTION_NETWORK_MAC
+                )
+        new, self._known_clients = detect_new_clients(
+            self._known_clients, set(data.hosts), registered
+        )
+        data.new_clients = [data.hosts[mac] for mac in sorted(new)]
+        return data
 
     async def _update(self) -> RouterData:
         # Critical endpoint: failures here mark the whole update failed.
@@ -392,12 +423,17 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         mesh = unwrap(raw.get("mesh")) or unwrap(raw.get("mesh_v2"))
         wired_ports: dict[str, int | None] = {}
         for node in _dig(mesh, "meshDevices", default=[]):
-            node_name = node.get("hostname") or node.get("model") or node.get("deviceId")
+            node_id = (node.get("deviceId") or "").lower() or None
+            node_name = node.get("hostname") or node.get("model") or node_id
             data.mesh_nodes.append(
                 {
-                    "id": node.get("deviceId"),
+                    "id": node_id,
                     "type": node.get("type"),
+                    # The gateway is the router itself; other nodes are extenders.
+                    "is_gateway": str(node.get("type") or "").lower() == "gateway",
                     "model": node.get("model"),
+                    "manufacturer": node.get("manufacturer"),
+                    "serial": node.get("serialNumber"),
                     "name": node_name,
                     "ipv4": node.get("ipv4") or None,
                     "firmware": node.get("softwareVersion"),
@@ -420,12 +456,15 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
                                 "rate_mbps": _kbit_to_mbit(sta.get("rate")),
                                 "uplink_rate_mbps": _kbit_to_mbit(sta.get("uplinkRate")),
                                 "access_point": node_name,
+                                "access_point_id": node_id,
                             }
             for port in node.get("ethernetPorts") or []:
                 for neighbour in port.get("neighbours") or []:
                     mac = (neighbour.get("macAddress") or "").lower()
                     if mac:
                         wired_ports[mac] = _int(port.get("speed"))
+        for node in data.mesh_nodes:
+            node["clients"] = sum(1 for s in stations.values() if s["access_point_id"] == node["id"])
         reserved = {
             (c.get("macaddress") or "").lower()
             for c in _dig(unwrap(raw.get("dhcp_clients")), "dhcp", "clients", default=[])
@@ -473,6 +512,7 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
                 "wired_port_mbps": wired_ports.get(mac),
                 "dhcp_reservation": mac in reserved,
                 "access_point": sta.get("access_point"),
+                "access_point_id": sta.get("access_point_id"),
                 "device_type": host.get("devicetype"),
                 "address_type": host.get("type"),
                 "last_seen": host.get("lastseen"),

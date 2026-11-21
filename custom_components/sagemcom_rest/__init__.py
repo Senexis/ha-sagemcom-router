@@ -26,7 +26,12 @@ from .const import (
 from .coordinator import SagemcomCoordinator
 from .entity import router_device_info
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER, Platform.SENSOR]
+PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.DEVICE_TRACKER,
+    Platform.EVENT,
+    Platform.SENSOR,
+]
 # Only set up when "Enable controls" is on: these entities change router settings.
 CONTROL_PLATFORMS = [Platform.BUTTON, Platform.LIGHT, Platform.SWITCH]
 
@@ -142,13 +147,12 @@ def _async_setup_subentries(
             sub_id = subentry.subentry_id
         ids[sub_type] = sub_id
 
-    router_id = (DOMAIN, coordinator.data.info.get("serial") or coordinator.client.host)
     dev_reg = dr.async_get(hass)
     ent_reg = er.async_get(hass)
     for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
-        target = ids[
-            ROUTER_SUBENTRY_TYPE if router_id in device.identifiers else CLIENTS_SUBENTRY_TYPE
-        ]
+        # Router and mesh extenders carry our identifiers; clients only a MAC.
+        own = any(ident[0] == DOMAIN for ident in device.identifiers)
+        target = ids[ROUTER_SUBENTRY_TYPE if own else CLIENTS_SUBENTRY_TYPE]
         if device.config_subentry_id == target:
             continue
         # Entities first: moving the device drops entities left in the old subentry.
@@ -170,8 +174,11 @@ async def async_remove_config_entry_device(
     hass: HomeAssistant, entry: SagemcomConfigEntry, device: dr.DeviceEntry
 ) -> bool:
     """Allow deleting a client device in the UI once the router no longer lists it."""
-    if any(ident[0] == DOMAIN for ident in device.identifiers):
-        return False  # the router itself
+    own = [ident[1] for ident in device.identifiers if ident[0] == DOMAIN]
+    if own:
+        # A mesh extender may go once it left the mesh; the router never.
+        nodes = {n["id"] for n in entry.runtime_data.data.mesh_nodes}
+        return all(i.startswith("mesh_") and i[5:] not in nodes for i in own)
     hosts = entry.runtime_data.data.hosts
     return not any(
         conn[0] == dr.CONNECTION_NETWORK_MAC and conn[1] in hosts

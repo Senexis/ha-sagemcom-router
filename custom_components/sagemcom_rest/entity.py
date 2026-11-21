@@ -65,6 +65,29 @@ def client_device_info(
     )
 
 
+def async_add_dynamic_entities(
+    entry: ConfigEntry,
+    coordinator: SagemcomCoordinator,
+    async_add_entities: AddEntitiesCallback,
+    keys: Callable[[], list[str]],
+    factory: Callable[[str], list[Entity]],
+    config_subentry_id: str | None,
+) -> None:
+    """Add entities for every key now and for keys that show up later."""
+    tracked: set[str] = set()
+
+    @callback
+    def _add_new() -> None:
+        new = [key for key in keys() if key not in tracked]
+        if new:
+            tracked.update(new)
+            entities = [e for key in new for e in factory(key)]
+            async_add_entities(entities, config_subentry_id=config_subentry_id)
+
+    _add_new()
+    entry.async_on_unload(coordinator.async_add_listener(_add_new))
+
+
 def async_add_client_entities(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -72,23 +95,44 @@ def async_add_client_entities(
     async_add_entities: AddEntitiesCallback,
     factory: Callable[[SagemcomCoordinator, str, str | None], list[Entity]],
 ) -> None:
-    """Add entities for every client now and for clients that show up later."""
+    """Add entities for every network client (under "Network clients")."""
     from . import subentry_id  # noqa: PLC0415  (avoid import cycle)
 
-    tracked: set[str] = set()
-    clients_id = subentry_id(entry, CLIENTS_SUBENTRY_TYPE)
     via = router_device_id(hass, entry, coordinator)
+    async_add_dynamic_entities(
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda: list(coordinator.data.hosts),
+        lambda mac: factory(coordinator, mac, via),
+        subentry_id(entry, CLIENTS_SUBENTRY_TYPE),
+    )
 
-    @callback
-    def _add_new() -> None:
-        new = [mac for mac in coordinator.data.hosts if mac not in tracked]
-        if new:
-            tracked.update(new)
-            entities = [e for mac in new for e in factory(coordinator, mac, via)]
-            async_add_entities(entities, config_subentry_id=clients_id)
 
-    _add_new()
-    entry.async_on_unload(coordinator.async_add_listener(_add_new))
+def extender_ids(coordinator: SagemcomCoordinator) -> list[str]:
+    return [n["id"] for n in coordinator.data.mesh_nodes if n["id"] and not n["is_gateway"]]
+
+
+def async_add_extender_entities(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    coordinator: SagemcomCoordinator,
+    async_add_entities: AddEntitiesCallback,
+    factory: Callable[[SagemcomCoordinator, str, str | None], list[Entity]],
+) -> None:
+    """Add entities for every mesh extender (under "Router")."""
+    from . import subentry_id  # noqa: PLC0415  (avoid import cycle)
+    from .const import ROUTER_SUBENTRY_TYPE  # noqa: PLC0415
+
+    via = router_device_id(hass, entry, coordinator)
+    async_add_dynamic_entities(
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda: extender_ids(coordinator),
+        lambda node_id: factory(coordinator, node_id, via),
+        subentry_id(entry, ROUTER_SUBENTRY_TYPE),
+    )
 
 
 def controls_enabled(entry: ConfigEntry) -> bool:
@@ -140,6 +184,41 @@ class SagemcomEntity(CoordinatorEntity[SagemcomCoordinator]):
         super().__init__(coordinator)
         self._attr_unique_id = f"{router_key(coordinator)}_{key}"
         self._attr_device_info = router_device_info(coordinator)
+
+
+class SagemcomExtenderEntity(CoordinatorEntity[SagemcomCoordinator]):
+    """Entity attached to a mesh extender device."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self, coordinator: SagemcomCoordinator, node_id: str, key: str, via: str | None
+    ) -> None:
+        super().__init__(coordinator)
+        self._node_id = node_id
+        self._attr_unique_id = f"mesh_{node_id}_{key}"
+        node = self.node or {}
+        self._attr_device_info = DeviceInfo(
+            # No MAC connection: the extender may also be listed as a network
+            # client with that MAC, and connections must be unique per entry.
+            identifiers={(DOMAIN, f"mesh_{node_id}")},
+            name=node.get("name") or f"Mesh node {node_id}",
+            manufacturer=node.get("manufacturer"),
+            model=node.get("model"),
+            serial_number=node.get("serial"),
+            sw_version=node.get("firmware"),
+            via_device_id=via,
+        )
+
+    @property
+    def node(self) -> dict[str, Any] | None:
+        return next(
+            (n for n in self.coordinator.data.mesh_nodes if n["id"] == self._node_id), None
+        )
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.node is not None
 
 
 class SagemcomClientEntity(CoordinatorEntity[SagemcomCoordinator]):

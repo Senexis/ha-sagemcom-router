@@ -31,7 +31,9 @@ from .coordinator import RouterData
 from .entity import (
     SagemcomClientEntity,
     SagemcomEntity,
+    SagemcomExtenderEntity,
     async_add_client_entities,
+    async_add_extender_entities,
     async_remove_stale_entities,
     controls_enabled,
     router_key,
@@ -462,6 +464,15 @@ async def async_setup_entry(
             ClientSensor(c, mac, via, desc) for desc in CLIENT_SENSORS
         ],
     )
+    async_add_extender_entities(
+        hass,
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda c, node_id, via: [
+            ExtenderSensor(c, node_id, via, desc) for desc in EXTENDER_SENSORS
+        ],
+    )
 
 
 class RouterSensor(SagemcomEntity, SensorEntity):
@@ -562,3 +573,64 @@ class ClientSensor(SagemcomClientEntity, SensorEntity):
     @property
     def native_value(self) -> Any:
         return self.entity_description.value_fn(self.host)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ExtenderSensorDescription(SensorEntityDescription):
+    value_fn: Callable[[dict[str, Any]], Any]
+    since_seconds: bool = False
+
+
+EXTENDER_SENSORS: tuple[ExtenderSensorDescription, ...] = (
+    ExtenderSensorDescription(
+        key="clients",
+        name="Wi-Fi clients",
+        icon="mdi:devices",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda n: n.get("clients"),
+    ),
+    ExtenderSensorDescription(
+        key="backhaul",
+        name="Backhaul",
+        icon="mdi:access-point-network",
+        value_fn=lambda n: n.get("backhaul"),
+    ),
+    ExtenderSensorDescription(
+        key="last_boot",
+        name="Last boot",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        since_seconds=True,
+        value_fn=lambda n: n.get("uptime"),
+    ),
+)
+
+
+class ExtenderSensor(SagemcomExtenderEntity, SensorEntity):
+    entity_description: ExtenderSensorDescription
+
+    def __init__(self, coordinator, node_id: str, via: str | None, description: ExtenderSensorDescription) -> None:
+        super().__init__(coordinator, node_id, description.key, via)
+        self.entity_description = description
+        self._since: datetime | None = None
+
+    @property
+    def native_value(self) -> Any:
+        value = self.entity_description.value_fn(self.node or {})
+        if not self.entity_description.since_seconds:
+            return value
+        if value is None:
+            return None
+        since = (dt_util.utcnow() - timedelta(seconds=value)).replace(microsecond=0)
+        # Only move the timestamp on a real reboot, not on poll jitter.
+        if self._since is None or abs((since - self._since).total_seconds()) > 120:
+            self._since = since
+        return self._since
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if self.entity_description.key == "backhaul":
+            node = self.node or {}
+            return {"quality": node.get("backhaul_quality")}
+        return None
