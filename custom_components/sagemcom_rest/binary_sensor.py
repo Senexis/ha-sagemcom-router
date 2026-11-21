@@ -13,13 +13,20 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import SagemcomConfigEntry, subentry_id
-from .const import CONF_ENABLE_CONTROLS, ROUTER_SUBENTRY_TYPE
+from .const import ROUTER_SUBENTRY_TYPE
 from .coordinator import RouterData
-from .entity import SagemcomEntity, router_key
+from .entity import (
+    SagemcomClientEntity,
+    SagemcomEntity,
+    async_add_client_entities,
+    async_remove_stale_entities,
+    client_blocked,
+    controls_enabled,
+    router_key,
+)
 
 
 def _up(value: Any) -> bool | None:
@@ -80,32 +87,72 @@ BINARY_SENSORS: tuple[RouterBinaryDescription, ...] = (
 )
 
 
+def _radio_binary(band: str) -> RouterBinaryDescription:
+    """Read-only twin of the band's radio switch (used while controls are off)."""
+    return RouterBinaryDescription(
+        key=f"wifi_{band.replace('.', '')}_radio",
+        name=f"Wi-Fi {band} GHz radio",
+        icon="mdi:wifi",
+        entity_registry_enabled_default=False,
+        value_fn=lambda d: d.wifi.get(band, {}).get("enabled"),
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: SagemcomConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
-    controls = entry.options.get(CONF_ENABLE_CONTROLS, False)
-    # With controls on, the Guest Wi-Fi switch shows the same state.
-    descriptions = [d for d in BINARY_SENSORS if not (controls and d.key == "guest_wifi")]
+    controls = controls_enabled(entry)
+    if controls:
+        # The Guest Wi-Fi and radio switches show these states.
+        descriptions = [d for d in BINARY_SENSORS if d.key != "guest_wifi"]
+    else:
+        descriptions = list(BINARY_SENSORS) + [_radio_binary(b) for b in coordinator.data.wifi]
     async_add_entities(
         (RouterBinarySensor(coordinator, d) for d in descriptions),
         config_subentry_id=subentry_id(entry, ROUTER_SUBENTRY_TYPE),
     )
-    # Drop entities this setup no longer provides: the per-band "Wi-Fi X GHz"
-    # sensors (status is an attribute of the band's clients sensor; the radio
-    # switches cover on/off) and the guest sensor while controls are on.
+    if not controls:
+        async_add_client_entities(
+            hass,
+            entry,
+            coordinator,
+            async_add_entities,
+            lambda c, mac, via: [ClientBlockedSensor(c, mac, via)],
+        )
+
+    # Remove what this setup no longer provides (the old per-band status sensors,
+    # and the read-only twins while controls are on).
     prefix = f"{router_key(coordinator)}_"
     wanted = {prefix + d.key for d in descriptions}
-    registry = er.async_get(hass)
-    for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
-        if (
-            ent.domain == "binary_sensor"
-            and ent.unique_id.startswith(prefix)
-            and ent.unique_id not in wanted
-        ):
-            registry.async_remove(ent.entity_id)
+    async_remove_stale_entities(
+        hass,
+        entry,
+        "binary_sensor",
+        lambda uid: uid in wanted if uid.startswith(prefix) else not controls,
+    )
+
+
+class ClientBlockedSensor(SagemcomClientEntity, BinarySensorEntity):
+    """Read-only twin of "Block internet" (used while controls are off)."""
+
+    _attr_name = "Internet blocked"
+    _attr_icon = "mdi:web-cancel"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator, mac: str, via: str | None) -> None:
+        super().__init__(coordinator, mac, "blocked", via)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.data.controls.get("parental_enabled") is not None
+
+    @property
+    def is_on(self) -> bool:
+        return client_blocked(self.coordinator, self._mac)
 
 
 class RouterBinarySensor(SagemcomEntity, BinarySensorEntity):

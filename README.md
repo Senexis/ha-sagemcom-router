@@ -53,6 +53,12 @@ entities that change router settings:
   router's device list and from Home Assistant.
 - **Reboot** button, disabled by default.
 
+While controls are off, the stateful controls have read-only counterparts instead,
+all disabled by default except the guest sensor: **Guest Wi-Fi** and **Wi-Fi X GHz
+radio** binary sensors, **LED brightness** sensor, and an **Internet blocked**
+binary sensor per client. Turning controls on swaps them for the switches/light
+(and back), so there is always exactly one entity per setting.
+
 Factory reset, firmware upgrade, backup/restore and WAN settings are deliberately
 not exposed.
 

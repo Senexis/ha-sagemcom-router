@@ -8,14 +8,14 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import SagemcomError
-from .const import CLIENTS_SUBENTRY_TYPE, DOMAIN
+from .const import CLIENTS_SUBENTRY_TYPE, CONF_ENABLE_CONTROLS, DOMAIN
 from .coordinator import SagemcomCoordinator
 
 
@@ -89,6 +89,38 @@ def async_add_client_entities(
 
     _add_new()
     entry.async_on_unload(coordinator.async_add_listener(_add_new))
+
+
+def controls_enabled(entry: ConfigEntry) -> bool:
+    return bool(entry.options.get(CONF_ENABLE_CONTROLS, False))
+
+
+def client_blocked(coordinator: SagemcomCoordinator, mac: str) -> bool:
+    """Whether an enabled "always block" parental-control rule exists for the MAC."""
+    controls = coordinator.data.controls
+    rule = controls.get("parental_rules", {}).get(mac)
+    return bool(
+        controls.get("parental_enabled")
+        and rule
+        and rule.get("enable")
+        and rule.get("AlwaysBlock")
+        and not rule.get("timeslots")
+    )
+
+
+@callback
+def async_remove_stale_entities(
+    hass: HomeAssistant, entry: ConfigEntry, domain: str, keep: Callable[[str], bool]
+) -> None:
+    """Remove this entry's `domain` entities for which keep(unique_id) is false.
+
+    Used where the entity set depends on the "Enable controls" option, so a
+    switched-off variant doesn't linger as "unavailable".
+    """
+    registry = er.async_get(hass)
+    for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if ent.domain == domain and not keep(ent.unique_id):
+            registry.async_remove(ent.entity_id)
 
 
 async def async_write(call: Awaitable[Any], action: str) -> Any:

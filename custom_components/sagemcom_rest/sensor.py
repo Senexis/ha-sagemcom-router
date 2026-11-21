@@ -28,7 +28,14 @@ from homeassistant.util import dt as dt_util
 from . import SagemcomConfigEntry, subentry_id
 from .const import ROUTER_SUBENTRY_TYPE
 from .coordinator import RouterData
-from .entity import SagemcomClientEntity, SagemcomEntity, async_add_client_entities
+from .entity import (
+    SagemcomClientEntity,
+    SagemcomEntity,
+    async_add_client_entities,
+    async_remove_stale_entities,
+    controls_enabled,
+    router_key,
+)
 
 BAND_LABEL = {"2.4": "2.4 GHz", "5": "5 GHz", "6": "6 GHz"}
 
@@ -313,6 +320,17 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
 )
 
 
+LED_SENSOR = RouterSensorDescription(
+    key="led_brightness",
+    name="LED brightness",
+    icon="mdi:led-on",
+    native_unit_of_measurement=PERCENTAGE,
+    entity_category=EntityCategory.DIAGNOSTIC,
+    entity_registry_enabled_default=False,
+    value_fn=lambda d: d.controls.get("led_brightness"),
+)
+
+
 def _is_cgnat(ip: str | None) -> bool | None:
     """100.64.0.0/10 = carrier-grade NAT (no real public IPv4)."""
     if not ip:
@@ -425,6 +443,12 @@ async def async_setup_entry(
     for i, port in enumerate(coordinator.data.lan_ports):
         if port.get("role") != "WAN":  # WAN port is covered by "WAN link speed"
             descriptions.append(_port_sensor(i, port))
+    controls = controls_enabled(entry)
+    if not controls:
+        descriptions.append(LED_SENSOR)  # read-only twin of the LEDs light
+    else:
+        led_uid = f"{router_key(coordinator)}_{LED_SENSOR.key}"
+        async_remove_stale_entities(hass, entry, "sensor", lambda uid: uid != led_uid)
     async_add_entities(
         (RouterSensor(coordinator, desc) for desc in descriptions),
         config_subentry_id=subentry_id(entry, ROUTER_SUBENTRY_TYPE),

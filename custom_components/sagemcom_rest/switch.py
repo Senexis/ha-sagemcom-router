@@ -13,7 +13,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import SagemcomConfigEntry, subentry_id
 from .const import BANDS, ROUTER_SUBENTRY_TYPE
 from .coordinator import SagemcomCoordinator
-from .entity import SagemcomClientEntity, SagemcomEntity, async_add_client_entities, async_write
+from .entity import (
+    SagemcomClientEntity,
+    SagemcomEntity,
+    async_add_client_entities,
+    async_write,
+    client_blocked,
+)
 
 PARENTAL = "/api/v1/parental_control"
 DEVICE_RULE = "/api/v1/parental_control/device_schedule"
@@ -138,14 +144,7 @@ class BlockInternetSwitch(SagemcomClientEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        rule = self._rule
-        return bool(
-            self.coordinator.data.controls.get("parental_enabled")
-            and rule
-            and rule.get("enable")
-            and rule.get("AlwaysBlock")
-            and not rule.get("timeslots")
-        )
+        return client_blocked(self.coordinator, self._mac)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
