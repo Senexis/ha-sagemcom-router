@@ -10,15 +10,13 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.device_tracker import ScannerEntity
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import SagemcomConfigEntry, subentry_id
-from .const import CLIENTS_SUBENTRY_TYPE, DOMAIN
+from . import SagemcomConfigEntry
 from .coordinator import SagemcomCoordinator
+from .entity import async_add_client_entities, client_device_info
 
 
 async def async_setup_entry(
@@ -26,28 +24,13 @@ async def async_setup_entry(
     entry: SagemcomConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator = entry.runtime_data
-    tracked: set[str] = set()
-    clients_id = subentry_id(entry, CLIENTS_SUBENTRY_TYPE)
-    # The router device is registered in async_setup_entry, before the platforms.
-    router_key = coordinator.data.info.get("serial") or coordinator.client.host
-    router = dr.async_get(hass).async_get_device_by_identifier(
-        (DOMAIN, router_key), entry.entry_id
+    async_add_client_entities(
+        hass,
+        entry,
+        entry.runtime_data,
+        async_add_entities,
+        lambda coordinator, mac, via: [RouterClientTracker(coordinator, mac, via)],
     )
-    router_device_id = router.id if router else None
-
-    @callback
-    def _add_new() -> None:
-        new = [mac for mac in coordinator.data.hosts if mac not in tracked]
-        if new:
-            tracked.update(new)
-            async_add_entities(
-                (RouterClientTracker(coordinator, mac, router_device_id) for mac in new),
-                config_subentry_id=clients_id,
-            )
-
-    _add_new()
-    entry.async_on_unload(coordinator.async_add_listener(_add_new))
 
 
 class RouterClientTracker(CoordinatorEntity[SagemcomCoordinator], ScannerEntity):
@@ -61,13 +44,7 @@ class RouterClientTracker(CoordinatorEntity[SagemcomCoordinator], ScannerEntity)
         super().__init__(coordinator)
         self._mac = mac
         self._attr_unique_id = f"{mac}_tracker"
-        host = self._host
-        # A name the user sets in the UI (name_by_user) still wins.
-        self._attr_device_info = DeviceInfo(
-            connections={(CONNECTION_NETWORK_MAC, mac)},
-            name=host.get("name") or host.get("hostname") or mac,
-            via_device_id=router_device_id,
-        )
+        self._attr_device_info = client_device_info(coordinator, mac, router_device_id)
 
     @property
     def _host(self) -> dict[str, Any]:

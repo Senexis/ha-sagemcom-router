@@ -34,7 +34,11 @@
       "init": {
         "title": "Options",
         "data": {
-          "scan_interval": "Polling interval (seconds)"
+          "scan_interval": "Polling interval (seconds)",
+          "enable_controls": "Enable controls"
+        },
+        "data_description": {
+          "enable_controls": "Adds entities that change router settings: guest Wi-Fi and Wi-Fi band switches, LED light, per-device internet blocking, WPS pairing, forget-device and reboot buttons. Off keeps the integration read-only."
         }
       }
     }

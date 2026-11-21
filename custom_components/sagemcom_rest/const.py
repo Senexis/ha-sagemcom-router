@@ -6,6 +6,7 @@ DOMAIN = "sagemcom_rest"
 
 CONF_VERIFY_SSL = "verify_ssl"
 CONF_SCAN_INTERVAL = "scan_interval"
+CONF_ENABLE_CONTROLS = "enable_controls"
 
 DEFAULT_HOST = "192.168.1.254"
 DEFAULT_USERNAME = "beheer"

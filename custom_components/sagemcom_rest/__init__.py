@@ -16,6 +16,7 @@ from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from .api import SagemcomAuthError, SagemcomError, SagemcomRestClient
 from .const import (
     CLIENTS_SUBENTRY_TYPE,
+    CONF_ENABLE_CONTROLS,
     CONF_SCAN_INTERVAL,
     CONF_VERIFY_SSL,
     DEFAULT_SCAN_INTERVAL,
@@ -26,6 +27,8 @@ from .coordinator import SagemcomCoordinator
 from .entity import router_device_info
 
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER, Platform.SENSOR]
+# Only set up when "Enable controls" is on: these entities change router settings.
+CONTROL_PLATFORMS = [Platform.BUTTON, Platform.LIGHT, Platform.SWITCH]
 
 type SagemcomConfigEntry = ConfigEntry[SagemcomCoordinator]
 
@@ -68,9 +71,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: SagemcomConfigEntry) -> 
     entry.runtime_data = coordinator
     _async_setup_subentries(hass, entry, coordinator)
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    coordinator.platforms = _platforms(entry)
+    await hass.config_entries.async_forward_entry_setups(entry, coordinator.platforms)
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True
+
+
+def _platforms(entry: ConfigEntry) -> list[Platform]:
+    if entry.options.get(CONF_ENABLE_CONTROLS, False):
+        return PLATFORMS + CONTROL_PLATFORMS
+    return PLATFORMS
 
 
 def subentry_id(entry: ConfigEntry, subentry_type: str) -> str | None:
@@ -129,12 +139,27 @@ def _async_setup_subentries(
     )
 
 
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: SagemcomConfigEntry, device: dr.DeviceEntry
+) -> bool:
+    """Allow deleting a client device in the UI once the router no longer lists it."""
+    if any(ident[0] == DOMAIN for ident in device.identifiers):
+        return False  # the router itself
+    hosts = entry.runtime_data.data.hosts
+    return not any(
+        conn[0] == dr.CONNECTION_NETWORK_MAC and conn[1] in hosts
+        for conn in device.connections
+    )
+
+
 async def _async_reload(hass: HomeAssistant, entry: SagemcomConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SagemcomConfigEntry) -> bool:
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(
+        entry, entry.runtime_data.platforms
+    )
     if unloaded:
         # Free the router's (limited) web session slot.
         await entry.runtime_data.client.logout()

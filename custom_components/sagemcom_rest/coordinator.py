@@ -28,6 +28,31 @@ from .const import BANDS, DOMAIN, SLOW_INTERVAL
 _LOGGER = logging.getLogger(__name__)
 
 
+def _slow_paths() -> dict[str, str]:
+    """Slow-changing or expensive endpoints, fetched every SLOW_INTERVAL."""
+    paths = {
+        "mesh": "/api/v2/easymesh/meshdevices",
+        "ntp": "/api/v1/ntp",
+        "dns_ipv4": "/api/v1/dns/ipv4",
+        "dns_ipv6": "/api/v1/dns/ipv6",
+        "dhcp": "/api/v1/dhcp",
+        "wan_ipv4": "/api/v1/wan/ipv4",
+        "lan_ipv6": "/api/v1/lan/ipv6",
+        "upnp": "/api/v1/advanced/upnp",
+        "firewall": "/api/v2/firewall",
+        "nat_rules": "/api/v1/nat/rules",
+        "mlo": "/api/v2/wireless/mlo/state",
+        "led": "/api/v1/led",
+        "parental": "/api/v1/parental_control",
+    }
+    for band, ident in BANDS.items():
+        paths[f"wifi_{band}"] = f"/api/v2/wireless/{ident}"
+    return paths
+
+
+SLOW_PATHS = _slow_paths()
+
+
 def _int(value: Any) -> int | None:
     try:
         return int(float(value))
@@ -68,6 +93,8 @@ class RouterData:
     hosts: dict[str, dict[str, Any]] = field(default_factory=dict)
     mesh_nodes: list[dict[str, Any]] = field(default_factory=list)
     misc: dict[str, Any] = field(default_factory=dict)
+    # State behind the control entities (LED, parental control).
+    controls: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)  # for diagnostics
 
 
@@ -95,6 +122,8 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         self._slow_cache: dict[str, Any] = {}
         self._slow_next = 0.0
         self._slow_task: asyncio.Task[None] | None = None
+        self._refetched_at: dict[str, float] = {}
+        self.platforms: list[str] = []  # set up by async_setup_entry
         self._prev_counters: tuple[float, int, int] | None = None
 
     # ------------------------------------------------------------ fetching
@@ -150,33 +179,30 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
 
     async def _refresh_slow(self) -> None:
         """Fetch slow-changing or expensive endpoints, then refresh entities."""
-        slow = {
-            "mesh": "/api/v2/easymesh/meshdevices",
-            "ntp": "/api/v1/ntp",
-            "dns_ipv4": "/api/v1/dns/ipv4",
-            "dns_ipv6": "/api/v1/dns/ipv6",
-            "dhcp": "/api/v1/dhcp",
-            "wan_ipv4": "/api/v1/wan/ipv4",
-            "lan_ipv6": "/api/v1/lan/ipv6",
-            "upnp": "/api/v1/advanced/upnp",
-            "firewall": "/api/v2/firewall",
-            "nat_rules": "/api/v1/nat/rules",
-            "mlo": "/api/v2/wireless/mlo/state",
-        }
-        for band, ident in BANDS.items():
-            slow[f"wifi_{band}"] = f"/api/v2/wireless/{ident}"
+        started = time.monotonic()
         cache: dict[str, Any] = {}
         try:
             cache["open"] = await self.client.get_open()
         except SagemcomError:
             cache["open"] = None
         try:
-            for key, path in slow.items():
+            for key, path in SLOW_PATHS.items():
                 cache[key] = await self._fetch(path, timeout=60)
         except SagemcomError as err:  # e.g. re-login failed; the next poll reports it
             _LOGGER.debug("Slow endpoints skipped this cycle: %s", err)
             return
+        # Keep values re-read after a write that happened while this ran.
+        for key, at in self._refetched_at.items():
+            if at > started and key in self._slow_cache:
+                cache[key] = self._slow_cache[key]
         self._slow_cache = cache
+        await self.async_request_refresh()
+
+    async def async_refetch(self, *keys: str) -> None:
+        """Re-read some slow-tier endpoints right away (after a write)."""
+        for key in keys:
+            self._slow_cache[key] = await self._fetch(SLOW_PATHS[key])
+            self._refetched_at[key] = time.monotonic()
         await self.async_request_refresh()
 
     # ------------------------------------------------------------- parsing
@@ -313,6 +339,26 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
                     "status": g.get("ssidStatus"),
                 }
 
+        # ---- Control state
+        led = _dig(unwrap(raw.get("led")), "leds_brightness", default={})
+        parental = unwrap(raw.get("parental"))
+        data.controls = {
+            "led_brightness": _int(led.get("brightness")),
+            "led_levels": sorted(
+                {
+                    level
+                    for level in (_int(x) for x in str(led.get("brightness_possible") or "").split(","))
+                    if level is not None
+                }
+            ),
+            "parental_enabled": parental.get("enable") if isinstance(parental, dict) else None,
+            "parental_rules": {
+                str(rule.get("SourceMac") or "").lower(): rule
+                for rule in (parental.get("schedules") or [] if isinstance(parental, dict) else [])
+                if rule.get("SourceMac")
+            },
+        }
+
         # ---- LAN ports
         for port in _dig(unwrap(raw.get("lan_stats")), "lan", "interfaces", default=[]):
             data.lan_ports.append(
@@ -381,6 +427,8 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
             band = sta.get("band") or wl.get("band")
             entry = {
                 "mac": mac,
+                "router_mac": host.get("macaddress"),  # as the router writes it
+                "router_id": host.get("id"),
                 "name": name,
                 "hostname": host.get("hostname"),
                 "ip": host.get("ipaddress") or None,

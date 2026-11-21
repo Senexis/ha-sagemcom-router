@@ -28,6 +28,24 @@ The router and its network clients are shown in separate groups ("Router" and
   by default; enable the ones you want for presence.
 - Diagnostics download (redacted).
 
+## Controls (optional)
+Off by default. Turn on **Enable controls** in the integration's options to add
+entities that change router settings:
+- **Guest Wi-Fi** switch (all guest bands at once).
+- **Wi-Fi radio** switch per band (2.4/5/6 GHz). Turning a band off drops every
+  device on it, guest included.
+- **LEDs** light: off or 25/50/75/100 % brightness.
+- **Start WPS pairing** button (push-button pairing on all bands).
+- **Block internet** switch per network client, using the router's parental
+  control ("always block" rule for that MAC). Devices with a time schedule made
+  in the router UI are left alone.
+- **Forget device** button per network client: removes an offline client from the
+  router's device list and from Home Assistant.
+- **Reboot** button, disabled by default.
+
+Factory reset, firmware upgrade, backup/restore and WAN settings are deliberately
+not exposed.
+
 ## API notes
 - Login: `POST /api/v2/login-params` -> salt/nonce, SHA-512-crypt challenge, then
   `POST /api/v1/login`; send cookie `__Host-csrf_token` as header `X-CSRF-Token`.
@@ -37,8 +55,9 @@ The router and its network clients are shown in separate groups ("Router" and
   from `/api/v1/hosts`).
 - `/api/v2/wireless/<band>` and `/api/v2/home` return Wi-Fi passphrases in plain text.
   `api.scrub()` strips credential-like keys from everything before it's stored.
-- The client only issues GETs (plus login/logout). It logs out on unload, because
-  the router has a limited number of web sessions.
+- Writes use flat form-encoded bodies (like the web UI), booleans as `true`/`false`,
+  guest SSID `enable` as `1`/`0`. Reads stay GET-only. The client logs out on
+  unload, because the router has a limited number of web sessions.
 
 ## Releasing
 Bump `version` in `custom_components/sagemcom_rest/manifest.json`, commit, then

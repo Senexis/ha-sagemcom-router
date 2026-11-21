@@ -13,8 +13,9 @@ else needs a challenge/response login:
 The session lives in cookies; every request after login must also carry the
 ``__Host-csrf_token`` cookie value in an ``X-CSRF-Token`` header.
 
-This module only performs GET requests (plus login/logout); it never changes
-router configuration.
+Reads use GET. ``write`` sends PUT/POST/DELETE requests; the integration only
+calls it from control entities, which exist only when the user turns on
+"Enable controls" in the options.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ import json
 import logging
 import secrets
 from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -135,6 +137,12 @@ def scrub(data: Any) -> Any:
     return data
 
 
+def _form_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 def unwrap(data: Any) -> Any:
     """Most endpoints return a one-element list; return that element."""
     if isinstance(data, list) and len(data) == 1:
@@ -185,11 +193,15 @@ class SagemcomRestClient:
         headers = {"Accept": "application/json"}
         if (token := self._csrf()) is not None:
             headers[CSRF_HEADER] = token
+        body: str | None = None
+        if data is not None:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            body = urlencode(data)
         try:
             async with self._session.request(
                 method,
                 self._base + path,
-                data=data,
+                data=body,
                 headers=headers,
                 ssl=self._ssl,
                 timeout=aiohttp.ClientTimeout(total=timeout) if timeout else self._timeout,
@@ -285,6 +297,32 @@ class SagemcomRestClient:
             raise SagemcomEndpointError(f"GET {path}: HTTP {status}")
         data = self._json(path, text)
         return scrub(data) if sanitize else data
+
+    async def write(
+        self, method: str, path: str, data: dict[str, Any] | None = None
+    ) -> Any:
+        """PUT/POST/DELETE like the web UI does: flat form-encoded body.
+
+        Booleans are sent as "true"/"false" (what the UI's HttpParams produce);
+        callers pass 1/0 where the UI converts to numbers. Re-logs in once if
+        the session expired. Raises SagemcomEndpointError when the router
+        rejects the request.
+        """
+        if method not in ("PUT", "POST", "DELETE"):
+            raise ValueError(method)
+        body = {k: _form_value(v) for k, v in (data or {}).items()}
+        async with self._lock:
+            if not self._logged_in:
+                await self._login_locked()
+            status, text = await self._raw(method, path, body)
+            if status in (400, 401, 403) and not await self._is_authenticated():
+                _LOGGER.debug("Session expired, logging in again")
+                await self._login_locked()
+                status, text = await self._raw(method, path, body)
+        if status not in (200, 201, 202, 204):
+            raise SagemcomEndpointError(f"{method} {path}: HTTP {status} {text[:200]}")
+        _LOGGER.debug("%s %s -> %s", method, path, status)
+        return self._json(path, text) if text.strip() else None
 
     async def get_open(self) -> Any:
         """Unauthenticated summary endpoint."""
