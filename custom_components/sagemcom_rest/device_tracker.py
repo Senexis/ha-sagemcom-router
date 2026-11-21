@@ -31,7 +31,9 @@ async def async_setup_entry(
     clients_id = subentry_id(entry, CLIENTS_SUBENTRY_TYPE)
     # The router device is registered in async_setup_entry, before the platforms.
     router_key = coordinator.data.info.get("serial") or coordinator.client.host
-    router = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, router_key)})
+    router = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, router_key), entry.entry_id
+    )
     router_device_id = router.id if router else None
 
     @callback
