@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
@@ -93,6 +94,7 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         self._unsupported: set[str] = set()
         self._slow_cache: dict[str, Any] = {}
         self._slow_next = 0.0
+        self._slow_task: asyncio.Task[None] | None = None
         self._prev_counters: tuple[float, int, int] | None = None
 
     # ------------------------------------------------------------ fetching
@@ -135,35 +137,47 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
             raw[key] = await self._fetch(path)
 
         now = time.monotonic()
-        if now >= self._slow_next:
-            # Slow-changing or expensive endpoints (meshdevices takes ~20 s).
-            slow = {
-                "open": None,
-                "mesh": "/api/v2/easymesh/meshdevices",
-                "ntp": "/api/v1/ntp",
-                "dns_ipv4": "/api/v1/dns/ipv4",
-                "dns_ipv6": "/api/v1/dns/ipv6",
-                "dhcp": "/api/v1/dhcp",
-                "wan_ipv4": "/api/v1/wan/ipv4",
-                "lan_ipv6": "/api/v1/lan/ipv6",
-                "upnp": "/api/v1/advanced/upnp",
-                "firewall": "/api/v2/firewall",
-                "nat_rules": "/api/v1/nat/rules",
-                "mlo": "/api/v2/wireless/mlo/state",
-            }
-            for band, ident in BANDS.items():
-                slow[f"wifi_{band}"] = f"/api/v2/wireless/{ident}"
-            for key, path in slow.items():
-                if path is None:
-                    try:
-                        self._slow_cache[key] = await self.client.get_open()
-                    except SagemcomError:
-                        self._slow_cache[key] = None
-                else:
-                    self._slow_cache[key] = await self._fetch(path, timeout=60)
+        if now >= self._slow_next and (self._slow_task is None or self._slow_task.done()):
+            # Runs next to the regular polls instead of inside one: the mesh
+            # endpoint alone takes ~20 s, which used to stall HA startup and
+            # every fifth-minute poll. Its data shows up one refresh later.
             self._slow_next = now + SLOW_INTERVAL.total_seconds()
+            self._slow_task = self.config_entry.async_create_background_task(
+                self.hass, self._refresh_slow(), f"{DOMAIN} slow endpoints"
+            )
         raw.update(self._slow_cache)
         return self._parse(raw, now)
+
+    async def _refresh_slow(self) -> None:
+        """Fetch slow-changing or expensive endpoints, then refresh entities."""
+        slow = {
+            "mesh": "/api/v2/easymesh/meshdevices",
+            "ntp": "/api/v1/ntp",
+            "dns_ipv4": "/api/v1/dns/ipv4",
+            "dns_ipv6": "/api/v1/dns/ipv6",
+            "dhcp": "/api/v1/dhcp",
+            "wan_ipv4": "/api/v1/wan/ipv4",
+            "lan_ipv6": "/api/v1/lan/ipv6",
+            "upnp": "/api/v1/advanced/upnp",
+            "firewall": "/api/v2/firewall",
+            "nat_rules": "/api/v1/nat/rules",
+            "mlo": "/api/v2/wireless/mlo/state",
+        }
+        for band, ident in BANDS.items():
+            slow[f"wifi_{band}"] = f"/api/v2/wireless/{ident}"
+        cache: dict[str, Any] = {}
+        try:
+            cache["open"] = await self.client.get_open()
+        except SagemcomError:
+            cache["open"] = None
+        try:
+            for key, path in slow.items():
+                cache[key] = await self._fetch(path, timeout=60)
+        except SagemcomError as err:  # e.g. re-login failed; the next poll reports it
+            _LOGGER.debug("Slow endpoints skipped this cycle: %s", err)
+            return
+        self._slow_cache = cache
+        await self.async_request_refresh()
 
     # ------------------------------------------------------------- parsing
     def _parse(self, raw: dict[str, Any], now: float) -> RouterData:
