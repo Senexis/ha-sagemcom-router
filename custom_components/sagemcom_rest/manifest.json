@@ -1,0 +1,15 @@
+{
+  "domain": "sagemcom_rest",
+  "name": "Sagemcom Router",
+  "codeowners": [
+    "@Senexis"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/Senexis/ha-sagemcom-router",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Senexis/ha-sagemcom-router/issues",
+  "requirements": [],
+  "version": "0.3.0"
+}
