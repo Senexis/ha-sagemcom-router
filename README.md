@@ -20,8 +20,9 @@ The router and its network clients are shown in separate groups ("Router" and
   total downloaded/uploaded (total_increasing, survives router reboots).
 - **Clients**: connected / Wi-Fi / wired device counts. `sensor.*_connected_devices`
   has a `devices` attribute (name, IP, band, signal), meant for dashboards and AI summaries.
-- **Wi-Fi per band (2.4/5/6 GHz)**: up/down, clients, channel (+ bandwidth, standard),
-  per-band traffic (disabled by default). Guest Wi-Fi on/off.
+- **Wi-Fi per band (2.4/5/6 GHz)**: clients (with band status and SSID as
+  attributes), channel and per-band traffic (disabled by default). Guest Wi-Fi
+  on/off sensor (replaced by the Guest Wi-Fi switch when controls are on).
 - **System**: CPU, memory, temperature (+ problem sensor), NAT table usage, last boot,
   firmware, mesh nodes, network configuration (DNS/DHCP/UPnP/firewall/NTP).
 - **Network clients**: one device per client with a device tracker (disabled by

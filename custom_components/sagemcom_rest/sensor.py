@@ -193,7 +193,6 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
         name="Connected devices",
         icon="mdi:devices",
         state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement="devices",
         value_fn=lambda d: len(_active(d)),
         attrs_fn=_device_list,
     ),
@@ -203,7 +202,6 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
         name="Wi-Fi devices",
         icon="mdi:wifi",
         state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement="devices",
         value_fn=lambda d: sum(1 for h in _active(d) if h["connection"] == "wifi"),
     ),
     RouterSensorDescription(
@@ -212,7 +210,6 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
         name="Wired devices",
         icon="mdi:ethernet",
         state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement="devices",
         value_fn=lambda d: sum(1 for h in _active(d) if h["connection"] != "wifi"),
     ),
     # ---- System
@@ -339,8 +336,7 @@ def _band_sensors(band: str) -> tuple[RouterSensorDescription, ...]:
             key=f"wifi_{slug}_clients",
             name=f"Wi-Fi {label} clients",
             icon="mdi:wifi",
-            native_unit_of_measurement="devices",
-            state_class=SensorStateClass.MEASUREMENT,
+                state_class=SensorStateClass.MEASUREMENT,
             value_fn=w("clients"),
             attrs_fn=lambda d: {
                 "ssid": d.wifi.get(band, {}).get("ssid"),
