@@ -122,6 +122,8 @@ class BlockInternetSwitch(SagemcomClientEntity, SwitchEntity):
 
     _attr_name = "Block internet"
     _attr_icon = "mdi:web-cancel"
+    # Config category: HA doesn't auto-expose these to voice assistants.
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: SagemcomCoordinator, mac: str, via: str | None) -> None:
         super().__init__(coordinator, mac, "block_internet", via)

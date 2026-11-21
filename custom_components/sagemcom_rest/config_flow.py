@@ -30,6 +30,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class SagemcomRestConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
+    MINOR_VERSION = 2
 
     async def _validate(self, data: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
         errors: dict[str, str] = {}

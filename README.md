@@ -24,9 +24,18 @@ The router and its network clients are shown in separate groups ("Router" and
   per-band traffic (disabled by default). Guest Wi-Fi on/off.
 - **System**: CPU, memory, temperature (+ problem sensor), NAT table usage, last boot,
   firmware, mesh nodes, network configuration (DNS/DHCP/UPnP/firewall/NTP).
-- **Device trackers** for every client the router knows. HA creates them disabled
-  by default; enable the ones you want for presence.
+- **Network clients**: one device per client with a device tracker (disabled by
+  default; enable the ones you want for presence). Tracker attributes: connection,
+  network (main/guest), band, SSID, signal, link rate both ways, speed of the wired
+  port it sits behind, DHCP/static, DHCP reservation, router's device-type guess.
+  Optional per-client sensors (disabled by default): connection, signal strength,
+  link speed.
 - Diagnostics download (redacted).
+
+Technical sensors (CPU, memory, temperature, NAT table, firmware, network
+configuration, Wi-Fi channels, port and WAN link speeds, IPv6 address, time sync,
+Wi-Fi/wired device counts) exist but are disabled by default, to keep the recorder
+lean. Enable them per entity if you want them.
 
 ## Controls (optional)
 Off by default. Turn on **Enable controls** in the integration's options to add
@@ -50,9 +59,9 @@ not exposed.
 - Login: `POST /api/v2/login-params` -> salt/nonce, SHA-512-crypt challenge, then
   `POST /api/v1/login`; send cookie `__Host-csrf_token` as header `X-CSRF-Token`.
   aiohttp needs `CookieJar(unsafe=True)` (IP host). An expired session gives HTTP 400.
-- Slow endpoints: `/api/v2/easymesh/meshdevices` ~18 s, `/api/v2/wireless/assoclist/*`
-  ~6 s each. Mesh is polled every 5 min; assoclist isn't used (clients per band come
-  from `/api/v1/hosts`).
+- Mesh/station data comes from `/api/v4/easymesh/meshdevices` (~1.5 s, every poll).
+  `/api/v2/easymesh/meshdevices` has the same data but takes ~20 s; it is only used
+  as a fallback. `/api/v2/wireless/assoclist/*` (~6 s each) isn't used.
 - `/api/v2/wireless/<band>` and `/api/v2/home` return Wi-Fi passphrases in plain text.
   `api.scrub()` strips credential-like keys from everything before it's stored.
 - Writes use flat form-encoded bodies (like the web UI), booleans as `true`/`false`,

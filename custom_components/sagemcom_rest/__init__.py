@@ -52,6 +52,33 @@ def create_client(hass: HomeAssistant, data: dict) -> SagemcomRestClient:
     )
 
 
+# Entities that became disabled-by-default in 1.2 (too technical for most users,
+# or recorder noise). Matched on the unique_id suffix after the router serial.
+_DISABLED_IN_1_2 = (
+    "_wan_status", "_wan_link_speed", "_public_ipv6", "_wifi_devices", "_wired_devices",
+    "_cpu_load", "_memory_usage", "_temperature", "_nat_table_usage", "_firmware",
+    "_network_config", "_ntp_synced",
+)
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """1.1 -> 1.2: disable the now disabled-by-default technical entities once."""
+    if entry.version == 1 and entry.minor_version < 2:
+        ent_reg = er.async_get(hass)
+        for entity in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+            uid = entity.unique_id
+            if entity.disabled_by is None and (
+                uid.endswith(_DISABLED_IN_1_2)
+                or (uid.rsplit("_", 1)[-1] == "channel" and "_wifi_" in uid)
+                or ("_port_" in uid and uid.endswith("_speed"))
+            ):
+                ent_reg.async_update_entity(
+                    entity.entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+                )
+        hass.config_entries.async_update_entry(entry, minor_version=2)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: SagemcomConfigEntry) -> bool:
     client = create_client(hass, dict(entry.data))
     try:

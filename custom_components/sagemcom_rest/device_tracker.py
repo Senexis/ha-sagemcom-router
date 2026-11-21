@@ -36,7 +36,10 @@ async def async_setup_entry(
 class RouterClientTracker(CoordinatorEntity[SagemcomCoordinator], ScannerEntity):
     """A LAN client seen by the router."""
 
-    _unrecorded_attributes = frozenset({"ipv6", "last_seen", "rate_mbps", "signal_dbm"})
+    # Values that change every poll: keep them out of the recorder.
+    _unrecorded_attributes = frozenset(
+        {"ipv6", "last_seen", "rate_mbps", "uplink_rate_mbps", "signal_dbm", "link_quality"}
+    )
 
     def __init__(
         self, coordinator: SagemcomCoordinator, mac: str, router_device_id: str | None
@@ -81,10 +84,17 @@ class RouterClientTracker(CoordinatorEntity[SagemcomCoordinator], ScannerEntity)
         h = self._host
         attrs = {
             "connection": h.get("connection"),
+            "network": h.get("network"),
             "band": h.get("band"),
+            "ssid": h.get("ssid"),
             "signal_dbm": h.get("signal"),
             "link_quality": h.get("link_quality"),
             "rate_mbps": h.get("rate_mbps"),
+            "uplink_rate_mbps": h.get("uplink_rate_mbps"),
+            "wired_port_mbps": h.get("wired_port_mbps"),
+            "device_type": h.get("device_type"),
+            "address_type": h.get("address_type"),
+            "dhcp_reservation": h.get("dhcp_reservation"),
             "access_point": h.get("access_point"),
             "ipv6": h.get("ipv6") or None,
             "last_seen": h.get("last_seen"),

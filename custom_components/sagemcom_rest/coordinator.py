@@ -31,7 +31,9 @@ _LOGGER = logging.getLogger(__name__)
 def _slow_paths() -> dict[str, str]:
     """Slow-changing or expensive endpoints, fetched every SLOW_INTERVAL."""
     paths = {
-        "mesh": "/api/v2/easymesh/meshdevices",
+        # Fallback for firmware without the v4 mesh endpoint (v2 takes ~20 s).
+        "mesh_v2": "/api/v2/easymesh/meshdevices",
+        "dhcp_clients": "/api/v1/dhcp/clients",
         "ntp": "/api/v1/ntp",
         "dns_ipv4": "/api/v1/dns/ipv4",
         "dns_ipv6": "/api/v1/dns/ipv6",
@@ -51,6 +53,12 @@ def _slow_paths() -> dict[str, str]:
 
 
 SLOW_PATHS = _slow_paths()
+MESH_V4 = "/api/v4/easymesh/meshdevices"
+
+
+def _kbit_to_mbit(value: Any) -> float | None:
+    rate = _int(value)
+    return round(rate / 1000, 1) if rate else None
 
 
 def _int(value: Any) -> int | None:
@@ -159,6 +167,8 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
             "wan_stats": "/api/v1/wan/ip/stats",
             "lan_stats": "/api/v1/lan/stats",
             "hosts": "/api/v1/hosts",
+            # Mesh nodes + per-station signal/rate; v4 answers in ~1.5 s.
+            "mesh": MESH_V4,
         }
         for band, ident in BANDS.items():
             fast[f"wifi_stats_{band}"] = f"/api/v2/wireless/stats/{ident}"
@@ -187,6 +197,8 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
             cache["open"] = None
         try:
             for key, path in SLOW_PATHS.items():
+                if key == "mesh_v2" and MESH_V4 not in self._unsupported:
+                    continue
                 cache[key] = await self._fetch(path, timeout=60)
         except SagemcomError as err:  # e.g. re-login failed; the next poll reports it
             _LOGGER.debug("Slow endpoints skipped this cycle: %s", err)
@@ -377,7 +389,9 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
 
         # ---- Mesh nodes and station signal info
         stations: dict[str, dict[str, Any]] = {}
-        for node in _dig(unwrap(raw.get("mesh")), "meshDevices", default=[]):
+        mesh = unwrap(raw.get("mesh")) or unwrap(raw.get("mesh_v2"))
+        wired_ports: dict[str, int | None] = {}
+        for node in _dig(mesh, "meshDevices", default=[]):
             node_name = node.get("hostname") or node.get("model") or node.get("deviceId")
             data.mesh_nodes.append(
                 {
@@ -400,13 +414,23 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
                             stations[mac] = {
                                 "band": radio.get("band"),
                                 "ssid": ssid.get("ssid"),
-                                "signal": _int(sta.get("signalStrength")),
+                                # 0 means "not measured" (seen on 6 GHz/MLO links).
+                                "signal": _int(sta.get("signalStrength")) or None,
                                 "link_quality": sta.get("linkQuality"),
-                                "rate_mbps": round(_int(sta.get("rate")) / 1000, 1)
-                                if _int(sta.get("rate"))
-                                else None,
+                                "rate_mbps": _kbit_to_mbit(sta.get("rate")),
+                                "uplink_rate_mbps": _kbit_to_mbit(sta.get("uplinkRate")),
                                 "access_point": node_name,
                             }
+            for port in node.get("ethernetPorts") or []:
+                for neighbour in port.get("neighbours") or []:
+                    mac = (neighbour.get("macAddress") or "").lower()
+                    if mac:
+                        wired_ports[mac] = _int(port.get("speed"))
+        reserved = {
+            (c.get("macaddress") or "").lower()
+            for c in _dig(unwrap(raw.get("dhcp_clients")), "dhcp", "clients", default=[])
+            if c.get("enable", True)
+        }
 
         # ---- Hosts
         for host in _dig(unwrap(raw.get("hosts")), "hosts", "list", default=[]):
@@ -435,13 +459,19 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
                 "ipv6": ipv6,
                 "active": bool(host.get("active")),
                 "connection": "wifi" if (link == "WiFi" or band) else (
-                    "ethernet" if link.lower().startswith("eth") else "wired/unknown"
+                    "ethernet"
+                    if link.lower().startswith("eth") or mac in wired_ports
+                    else "wired/unknown"
                 ),
                 "band": band,
                 "signal": sta.get("signal") if sta else (_int(wl.get("rssi0")) or None),
                 "link_quality": sta.get("link_quality"),
-                "rate_mbps": sta.get("rate_mbps")
-                or (round(_int(wl.get("rate")) / 1000, 1) if _int(wl.get("rate")) else None),
+                "rate_mbps": sta.get("rate_mbps") or _kbit_to_mbit(wl.get("rate")),
+                "uplink_rate_mbps": sta.get("uplink_rate_mbps"),
+                "ssid": sta.get("ssid"),
+                "network": "guest" if "guest" in str(host.get("interface_l3") or "").lower() else "main",
+                "wired_port_mbps": wired_ports.get(mac),
+                "dhcp_reservation": mac in reserved,
                 "access_point": sta.get("access_point"),
                 "device_type": host.get("devicetype"),
                 "address_type": host.get("type"),

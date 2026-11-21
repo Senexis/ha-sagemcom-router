@@ -57,6 +57,7 @@ BINARY_SENSORS: tuple[RouterBinaryDescription, ...] = (
     ),
     RouterBinaryDescription(
         key="ntp_synced",
+        entity_registry_enabled_default=False,
         name="Time synchronized",
         icon="mdi:clock-check-outline",
         entity_category=EntityCategory.DIAGNOSTIC,

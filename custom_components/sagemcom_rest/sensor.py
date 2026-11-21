@@ -28,7 +28,7 @@ from homeassistant.util import dt as dt_util
 from . import SagemcomConfigEntry, subentry_id
 from .const import ROUTER_SUBENTRY_TYPE
 from .coordinator import RouterData
-from .entity import SagemcomEntity
+from .entity import SagemcomClientEntity, SagemcomEntity, async_add_client_entities
 
 BAND_LABEL = {"2.4": "2.4 GHz", "5": "5 GHz", "6": "6 GHz"}
 
@@ -115,6 +115,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="wan_status",
+        entity_registry_enabled_default=False,
         name="Internet status",
         icon="mdi:web",
         value_fn=lambda d: d.wan.get("status"),
@@ -133,6 +134,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="wan_link_speed",
+        entity_registry_enabled_default=False,
         name="WAN link speed",
         icon="mdi:speedometer",
         device_class=SensorDeviceClass.DATA_RATE,
@@ -155,6 +157,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="public_ipv6",
+        entity_registry_enabled_default=False,
         name="Public IPv6 address",
         icon="mdi:ip-network-outline",
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -196,6 +199,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="wifi_devices",
+        entity_registry_enabled_default=False,
         name="Wi-Fi devices",
         icon="mdi:wifi",
         state_class=SensorStateClass.MEASUREMENT,
@@ -204,6 +208,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="wired_devices",
+        entity_registry_enabled_default=False,
         name="Wired devices",
         icon="mdi:ethernet",
         state_class=SensorStateClass.MEASUREMENT,
@@ -213,6 +218,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     # ---- System
     RouterSensorDescription(
         key="cpu_load",
+        entity_registry_enabled_default=False,
         name="CPU load",
         icon="mdi:cpu-32-bit",
         native_unit_of_measurement=PERCENTAGE,
@@ -222,6 +228,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="memory_usage",
+        entity_registry_enabled_default=False,
         name="Memory usage",
         icon="mdi:memory",
         native_unit_of_measurement=PERCENTAGE,
@@ -240,6 +247,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="temperature",
+        entity_registry_enabled_default=False,
         name="Temperature",
         device_class=SensorDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
@@ -250,6 +258,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="nat_table_usage",
+        entity_registry_enabled_default=False,
         name="NAT table usage",
         icon="mdi:table-network",
         native_unit_of_measurement=PERCENTAGE,
@@ -273,6 +282,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="firmware",
+        entity_registry_enabled_default=False,
         name="Firmware",
         icon="mdi:chip",
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -294,6 +304,7 @@ SENSORS: tuple[RouterSensorDescription, ...] = (
     ),
     RouterSensorDescription(
         key="network_config",
+        entity_registry_enabled_default=False,
         name="Network configuration",
         icon="mdi:cog-outline",
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -341,6 +352,7 @@ def _band_sensors(band: str) -> tuple[RouterSensorDescription, ...]:
         ),
         RouterSensorDescription(
             key=f"wifi_{slug}_channel",
+            entity_registry_enabled_default=False,
             name=f"Wi-Fi {label} channel",
             icon="mdi:radio-tower",
             entity_category=EntityCategory.DIAGNOSTIC,
@@ -390,6 +402,7 @@ def _port_sensor(index: int, port: dict[str, Any]) -> RouterSensorDescription:
 
     return RouterSensorDescription(
         key=f"port_{name}_speed",
+        entity_registry_enabled_default=False,
         name=f"{label} speed",
         icon="mdi:ethernet-cable",
         device_class=SensorDeviceClass.DATA_RATE,
@@ -419,6 +432,15 @@ async def async_setup_entry(
     async_add_entities(
         (RouterSensor(coordinator, desc) for desc in descriptions),
         config_subentry_id=subentry_id(entry, ROUTER_SUBENTRY_TYPE),
+    )
+    async_add_client_entities(
+        hass,
+        entry,
+        coordinator,
+        async_add_entities,
+        lambda c, mac, via: [
+            ClientSensor(c, mac, via, desc) for desc in CLIENT_SENSORS
+        ],
     )
 
 
@@ -454,3 +476,69 @@ class RouterSensor(SagemcomEntity, SensorEntity):
     def _handle_coordinator_update(self) -> None:
         self._update_values()
         super()._handle_coordinator_update()
+
+
+CONNECTION_OPTIONS = ["2.4 GHz", "5 GHz", "6 GHz", "Wi-Fi", "Ethernet", "Offline"]
+
+
+def _connection(host: dict[str, Any]) -> str | None:
+    if not host:
+        return None
+    if not host.get("active"):
+        return "Offline"
+    if host.get("connection") == "wifi":
+        return BAND_LABEL.get(host.get("band") or "", "Wi-Fi")
+    return "Ethernet"
+
+
+@dataclass(frozen=True, kw_only=True)
+class ClientSensorDescription(SensorEntityDescription):
+    value_fn: Callable[[dict[str, Any]], Any]
+
+
+# Per-client sensors, all disabled by default (enable them for the devices you care
+# about; the same values are attributes of the device tracker).
+CLIENT_SENSORS: tuple[ClientSensorDescription, ...] = (
+    ClientSensorDescription(
+        key="connection",
+        name="Connection",
+        icon="mdi:lan-connect",
+        device_class=SensorDeviceClass.ENUM,
+        options=CONNECTION_OPTIONS,
+        entity_registry_enabled_default=False,
+        value_fn=_connection,
+    ),
+    ClientSensorDescription(
+        key="signal",
+        name="Signal strength",
+        device_class=SensorDeviceClass.SIGNAL_STRENGTH,
+        native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda h: h.get("signal") if h.get("active") else None,
+    ),
+    ClientSensorDescription(
+        key="link_speed",
+        name="Link speed",
+        icon="mdi:speedometer",
+        device_class=SensorDeviceClass.DATA_RATE,
+        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda h: (h.get("rate_mbps") or h.get("wired_port_mbps")) if h.get("active") else None,
+    ),
+)
+
+
+class ClientSensor(SagemcomClientEntity, SensorEntity):
+    entity_description: ClientSensorDescription
+
+    def __init__(self, coordinator, mac: str, via: str | None, description: ClientSensorDescription) -> None:
+        super().__init__(coordinator, mac, description.key, via)
+        self.entity_description = description
+
+    @property
+    def native_value(self) -> Any:
+        return self.entity_description.value_fn(self.host)
