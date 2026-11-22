@@ -18,6 +18,24 @@ GUEST = "02:00:00:00:10:04"  # guest network, no station info
 OLD = "02:00:00:00:10:05"  # offline
 
 
+# Endpoint of each raw() key (the coordinator's fast and slow tiers).
+PATHS: dict[str, str] = {
+    "device_info": "/api/v1/deviceInfo",
+    "device": "/api/v1/device",
+    "wan_stats": "/api/v1/wan/ip/stats",
+    "lan_stats": "/api/v1/lan/stats",
+    "hosts": "/api/v1/hosts",
+    "mesh": "/api/v4/easymesh/meshdevices",
+    "wifi_stats_2.4": "/api/v2/wireless/stats/24",
+    "wifi_stats_5": "/api/v2/wireless/stats/5",
+    "wifi_2.4": "/api/v2/wireless/24",
+    "wifi_5": "/api/v2/wireless/5",
+    "led": "/api/v1/led",
+    "parental": "/api/v1/parental_control",
+    "dhcp_clients": "/api/v1/dhcp/clients",
+}
+
+
 def raw(rx_bytes: int = 1_000_000_000, tx_bytes: int = 100_000_000) -> dict[str, Any]:
     return {
         "device_info": [
@@ -49,15 +67,17 @@ def raw(rx_bytes: int = 1_000_000_000, tx_bytes: int = 100_000_000) -> dict[str,
         "lan_stats": [{"lan": {"interfaces": []}}],
         "wifi_stats_2.4": [{"wireless": {"ssid": {"status": "Up", "stats": {}}}}],
         "wifi_stats_5": [{"wireless": {"ssid": {"status": "Up", "stats": {}}}}],
+        "wifi_2.4": [{"wireless": {"radio": {"enable": True, "channel": "6"}, "ssid": {"id": "TestNet"}}}],
+        "wifi_5": [{"wireless": {"radio": {"enable": True, "channel": "36"}, "ssid": {"id": "TestNet"}}}],
         "hosts": [
             {
                 "hosts": {
                     "list": [
-                        _host(2, PHONE, "Phone", "192.0.2.20", link="WiFi"),
-                        _host(3, PLUG, "Plug", "192.0.2.21", link="WiFi"),
-                        _host(4, NAS, "NAS", "192.0.2.10", link="Other"),
-                        _host(5, GUEST, "Guest-Laptop", "192.0.2.150", link="WiFi", iface="Guest"),
-                        _host(6, OLD, "Old-Tablet", "192.0.2.30", link="WiFi", active=False),
+                        host(2, PHONE, "Phone", "192.0.2.20", link="WiFi"),
+                        host(3, PLUG, "Plug", "192.0.2.21", link="WiFi"),
+                        host(4, NAS, "NAS", "192.0.2.10", link="Other"),
+                        host(5, GUEST, "Guest-Laptop", "192.0.2.150", link="WiFi", iface="Guest"),
+                        host(6, OLD, "Old-Tablet", "192.0.2.30", link="WiFi", active=False),
                     ]
                 }
             }
@@ -124,7 +144,7 @@ def raw(rx_bytes: int = 1_000_000_000, tx_bytes: int = 100_000_000) -> dict[str,
     }
 
 
-def _host(
+def host(
     host_id: int,
     mac: str,
     name: str,

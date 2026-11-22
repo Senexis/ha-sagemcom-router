@@ -86,9 +86,20 @@ Host, username, password and SSL verification can be changed later with
 **Reconfigure** on the integration page (it refuses a different router).
 
 ## Development
-`pip install -r requirements_test.txt && python -m pytest` runs the tests for the
-API client and the parser. They use synthetic router data (`tests/router_data.py`)
-and small stand-ins for Home Assistant, so no HA install is needed.
+Tests run on Home Assistant's own test package, `pytest-homeassistant`, against a
+real HA instance. They need Python 3.14 on Linux or macOS; on Windows, use WSL:
+
+```shell
+pip install -r requirements_test.txt
+python -m pytest
+```
+
+A fake router (`tests/common.py`) serves synthetic data (`tests/router_data.py`) and
+applies the integration's writes, so no router is touched. The tests cover the API
+client, parsing, setup, migration, the config, reauth, reconfigure and options
+flows, every platform including the controls, the new-client event and the
+diagnostics. When Home Assistant is updated, bump `pytest-homeassistant` in
+`requirements_test.txt` to the same version; the package is released per HA version.
 
 ## Releasing
 Bump `version` in `custom_components/sagemcom_rest/manifest.json`, commit, then

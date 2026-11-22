@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
-from sagemcom_rest.coordinator import SagemcomCoordinator, detect_new_clients
+from homeassistant.core import HomeAssistant
+
+from custom_components.sagemcom_rest.coordinator import (
+    SagemcomCoordinator,
+    detect_new_clients,
+)
 
 from . import router_data as rd
+from .common import FakeRouter, make_entry
 
 
 @pytest.fixture
-def coordinator() -> SagemcomCoordinator:
-    client = SimpleNamespace(host="192.0.2.1")
-    return SagemcomCoordinator(None, SimpleNamespace(entry_id="test"), client, 30)
+def coordinator(hass: HomeAssistant) -> SagemcomCoordinator:
+    entry = make_entry()
+    entry.add_to_hass(hass)
+    return SagemcomCoordinator(hass, entry, FakeRouter(), 30)
 
 
 def test_router_info_and_wan(coordinator: SagemcomCoordinator) -> None:
