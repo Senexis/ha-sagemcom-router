@@ -56,12 +56,40 @@ class SagemcomConnectionError(SagemcomError):
     """Router unreachable / timeout."""
 
 
+class SagemcomBusyError(SagemcomConnectionError):
+    """The router answers, but its API is failing (5xx, or a bare 400 page).
+
+    Seen when the router's web service is overloaded, e.g. with too many open
+    sessions. It passes on its own; logging in again only makes it worse.
+    """
+
+
 class SagemcomAuthError(SagemcomError):
     """Login rejected."""
 
 
 class SagemcomEndpointError(SagemcomError):
     """Endpoint not available on this firmware (while logged in)."""
+
+
+def _api_exception(text: str) -> bool:
+    """Whether a body is the API's own JSON error ({"exception": ...}).
+
+    The API answers unknown endpoints and requests without a session this way;
+    a broken web service answers with a plain "400 Bad Request" or an HTML page.
+    """
+    try:
+        data = unwrap(json.loads(text))
+    except ValueError:
+        return False
+    return isinstance(data, dict) and "exception" in data
+
+
+def _failure(method: str, path: str, status: int, text: str) -> SagemcomError:
+    if status >= 500 or (status == 400 and not _api_exception(text)):
+        return SagemcomBusyError(f"{method} {path}: HTTP {status} (router API not responding)")
+    detail = f" {text[:200]}" if method != "GET" else ""
+    return SagemcomEndpointError(f"{method} {path}: HTTP {status}{detail}")
 
 
 def sha512_crypt(password: str, salt: str, rounds: int = 5000) -> str:
@@ -224,12 +252,15 @@ class SagemcomRestClient:
             await self._login_locked()
 
     async def _login_locked(self) -> None:
-        self._logged_in = False
-        self._session.cookie_jar.clear()
+        # End the old session first: the router keeps sessions open until they
+        # time out, and too many of them break its API.
+        await self._drop_session()
         status, text = await self._raw(
             "POST", "/api/v2/login-params", {"login": self._username}
         )
         if status != 200:
+            if status >= 500 or (status == 400 and not _api_exception(text)):
+                raise _failure("POST", "/api/v2/login-params", status, text)
             raise SagemcomError(f"login-params failed (HTTP {status})")
         params = unwrap(self._json("login-params", text)) or {}
         raw_salt, nonce = params.get("salt"), params.get("nonce")
@@ -254,25 +285,68 @@ class SagemcomRestClient:
             self._logged_in = True
             _LOGGER.debug("Logged in to %s", self.host)
             return
+        if status >= 500 or (status == 400 and not _api_exception(text)):
+            raise _failure("POST", "/api/v1/login", status, text)
         if status in (400, 401, 403):
             raise SagemcomAuthError(f"login rejected (HTTP {status})")
         raise SagemcomError(f"login failed (HTTP {status}): {text[:200]}")
 
     async def logout(self) -> None:
-        if not self._logged_in:
-            return
-        try:
-            await self._raw("POST", "/api/v1/logout", {})
-        except SagemcomError:
-            pass
-        self._logged_in = False
+        async with self._lock:
+            await self._drop_session()
 
-    async def _is_authenticated(self) -> bool:
-        status, text = await self._raw("GET", "/api/v1/authenticated")
-        if status != 200:
+    async def _drop_session(self) -> None:
+        """Log the current session out (best effort) and forget its cookies."""
+        if self._logged_in:
+            self._logged_in = False
+            try:
+                await self._raw("POST", "/api/v1/logout", {}, timeout=5)
+            except SagemcomError:
+                pass
+        self._session.cookie_jar.clear()
+
+    async def _session_state(self) -> bool | None:
+        """True/False when the router says whether we're logged in, None if it can't."""
+        try:
+            status, text = await self._raw("GET", "/api/v1/authenticated")
+        except SagemcomConnectionError:
+            return None
+        if status in (401, 403) or (status == 400 and _api_exception(text)):
             return False
-        data = unwrap(self._json("authenticated", text))
+        if status != 200:
+            return None
+        try:
+            data = unwrap(self._json("authenticated", text))
+        except SagemcomError:
+            return None
         return bool(isinstance(data, dict) and data.get("authenticated"))
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> tuple[int, str]:
+        """Send a request with the session, logging in again once if it expired.
+
+        Logs in again only when the router confirms the session is gone. When
+        its API is failing instead, a new login would just add another open
+        session, so that raises SagemcomBusyError.
+        """
+        async with self._lock:
+            if not self._logged_in:
+                await self._login_locked()
+            status, text = await self._raw(method, path, body, timeout)
+            if status in (400, 401, 403):
+                state = await self._session_state()
+                if state is None:
+                    raise _failure(method, path, status, text)
+                if state is False:
+                    _LOGGER.debug("Session expired, logging in again")
+                    await self._login_locked()
+                    status, text = await self._raw(method, path, body, timeout)
+        return status, text
 
     # ------------------------------------------------------------------ api
     async def get(
@@ -280,21 +354,15 @@ class SagemcomRestClient:
     ) -> Any:
         """GET an endpoint, re-logging in once if the session expired.
 
-        Raises SagemcomEndpointError if the endpoint errors while the session
-        is valid (i.e. not supported by this firmware).
+        Raises SagemcomEndpointError if the API refuses the endpoint while the
+        session is valid (i.e. not supported by this firmware), and
+        SagemcomBusyError when the router's API is failing.
         """
         if not path.startswith("/"):
             path = "/" + path
-        async with self._lock:
-            if not self._logged_in:
-                await self._login_locked()
-            status, text = await self._raw("GET", path, timeout=timeout)
-            if status in (400, 401, 403) and not await self._is_authenticated():
-                _LOGGER.debug("Session expired, logging in again")
-                await self._login_locked()
-                status, text = await self._raw("GET", path, timeout=timeout)
+        status, text = await self._request("GET", path, timeout=timeout)
         if status != 200:
-            raise SagemcomEndpointError(f"GET {path}: HTTP {status}")
+            raise _failure("GET", path, status, text)
         data = self._json(path, text)
         return scrub(data) if sanitize else data
 
@@ -311,16 +379,9 @@ class SagemcomRestClient:
         if method not in ("PUT", "POST", "DELETE"):
             raise ValueError(method)
         body = {k: _form_value(v) for k, v in (data or {}).items()}
-        async with self._lock:
-            if not self._logged_in:
-                await self._login_locked()
-            status, text = await self._raw(method, path, body)
-            if status in (400, 401, 403) and not await self._is_authenticated():
-                _LOGGER.debug("Session expired, logging in again")
-                await self._login_locked()
-                status, text = await self._raw(method, path, body)
+        status, text = await self._request(method, path, body)
         if status not in (200, 201, 202, 204):
-            raise SagemcomEndpointError(f"{method} {path}: HTTP {status} {text[:200]}")
+            raise _failure(method, path, status, text)
         _LOGGER.debug("%s %s -> %s", method, path, status)
         return self._json(path, text) if text.strip() else None
 

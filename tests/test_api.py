@@ -136,17 +136,73 @@ async def test_get_relogs_in_when_session_expired(
     assert _calls(aioclient_mock)[2:] == [
         "GET /api/v1/hosts",
         "GET /api/v1/authenticated",
+        "POST /api/v1/logout",  # the old session is ended, not left open
         "POST /api/v2/login-params",
         "POST /api/v1/login",
         "GET /api/v1/hosts",
     ]
 
 
-async def test_unsupported_endpoint(client, aioclient_mock: AiohttpClientMocker) -> None:
-    aioclient_mock.get(f"{BASE}/api/v9/nope", status=404)
+API_EXCEPTION = {"exception": {"domain": "/api/v9/nope", "code": "400", "errors": []}}
+
+
+@pytest.mark.parametrize(
+    ("status", "body"), [(404, {"text": ""}), (400, {"json": API_EXCEPTION})]
+)
+async def test_unsupported_endpoint(
+    client, aioclient_mock: AiohttpClientMocker, status: int, body: dict
+) -> None:
+    """The API's own JSON error with a valid session: not on this firmware."""
+    aioclient_mock.get(f"{BASE}/api/v9/nope", status=status, **body)
+    aioclient_mock.get(f"{BASE}/api/v1/authenticated", json=[{"authenticated": True}])
     await client.login()
     with pytest.raises(api.SagemcomEndpointError):
         await client.get("/api/v9/nope")
+
+
+async def test_expired_session_detected_from_api_error(
+    client, aioclient_mock: AiohttpClientMocker
+) -> None:
+    """Without a session the router answers /authenticated with its JSON 400."""
+    responses = iter([400, 200])
+
+    async def _info(method, url, data):
+        if next(responses) == 400:
+            return AiohttpClientMockResponse(method, url, status=400, text="400 Bad Request")
+        return AiohttpClientMockResponse(method, url, json=[{"serialNumber": "X"}])
+
+    aioclient_mock.get(f"{BASE}/api/v1/deviceInfo", side_effect=_info)
+    aioclient_mock.get(f"{BASE}/api/v1/authenticated", status=400, json=API_EXCEPTION)
+    await client.login()
+    await client.get("/api/v1/deviceInfo")
+    assert _calls(aioclient_mock).count("POST /api/v1/login") == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "text"),
+    [(400, "400 Bad Request"), (503, "<html>503 Service Unavailable</html>")],
+)
+async def test_failing_router_api_does_not_log_in_again(
+    client, aioclient_mock: AiohttpClientMocker, status: int, text: str
+) -> None:
+    """A failing web service is not an expired session: no new login piles up."""
+    aioclient_mock.get(f"{BASE}/api/v1/deviceInfo", status=status, text=text)
+    aioclient_mock.get(f"{BASE}/api/v1/authenticated", status=503, text="<html>503</html>")
+    await client.login()
+    with pytest.raises(api.SagemcomBusyError):
+        await client.get("/api/v1/deviceInfo")
+    assert _calls(aioclient_mock).count("POST /api/v1/login") == 1
+
+
+async def test_login_on_failing_router_is_not_an_auth_error(
+    session: ClientSession, aioclient_mock: AiohttpClientMocker
+) -> None:
+    """A bare 400 page at login must not start a reauth flow."""
+    aioclient_mock.post(f"{BASE}/api/v2/login-params", json=[{"salt": "abc", "nonce": "n0"}])
+    aioclient_mock.post(f"{BASE}/api/v1/login", status=400, text="400 Bad Request")
+    client = api.SagemcomRestClient(session, "192.0.2.1", "admin", "pw")
+    with pytest.raises(api.SagemcomBusyError):
+        await client.login()
 
 
 async def test_connection_error(client, aioclient_mock: AiohttpClientMocker) -> None:
@@ -165,8 +221,9 @@ async def test_write_form_encodes(client, aioclient_mock: AiohttpClientMocker) -
 
 
 async def test_write_refused(client, aioclient_mock: AiohttpClientMocker) -> None:
-    aioclient_mock.delete(f"{BASE}/api/v1/host/3", status=500, text="busy")
-    with pytest.raises(api.SagemcomEndpointError, match="HTTP 500 busy"):
+    aioclient_mock.delete(f"{BASE}/api/v1/host/3", status=400, json=API_EXCEPTION)
+    aioclient_mock.get(f"{BASE}/api/v1/authenticated", json=[{"authenticated": True}])
+    with pytest.raises(api.SagemcomEndpointError, match="HTTP 400 .*exception"):
         await client.write("DELETE", "/api/v1/host/3")
     with pytest.raises(ValueError):
         await client.write("PATCH", "/api/v1/host/3")

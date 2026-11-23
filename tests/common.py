@@ -42,6 +42,7 @@ class FakeRouter:
         self.writes: list[tuple[str, str, dict[str, Any] | None]] = []
         self.fail_login: Exception | None = None
         self.fail_get: Exception | None = None
+        self.fail_paths: dict[str, Exception] = {}  # per-path GET failures
         self.fail_write: Exception | None = None
         self.logins = 0
         self.logouts = 0
@@ -64,6 +65,8 @@ class FakeRouter:
     async def get(self, path: str, *, sanitize: bool = True, timeout: float | None = None) -> Any:
         if self.fail_get:
             raise self.fail_get
+        if path in self.fail_paths:
+            raise self.fail_paths[path]
         for key, key_path in rd.PATHS.items():
             if key_path == path and key in self.raw:
                 return copy.deepcopy(self.raw[key])

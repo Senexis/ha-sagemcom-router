@@ -18,6 +18,7 @@ from homeassistant.util import dt as dt_util
 
 from .api import (
     SagemcomAuthError,
+    SagemcomBusyError,
     SagemcomConnectionError,
     SagemcomEndpointError,
     SagemcomError,
@@ -172,6 +173,8 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
             data = await self._update()
         except SagemcomAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
+        except SagemcomBusyError as err:
+            raise UpdateFailed(f"Router API not responding: {err}") from err
         except SagemcomConnectionError as err:
             raise UpdateFailed(f"Router unreachable: {err}") from err
         except SagemcomError as err:

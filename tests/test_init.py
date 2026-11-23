@@ -13,6 +13,7 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from custom_components.sagemcom_rest import async_remove_config_entry_device
 from custom_components.sagemcom_rest.api import (
     SagemcomAuthError,
+    SagemcomBusyError,
     SagemcomConnectionError,
 )
 from custom_components.sagemcom_rest.const import (
@@ -136,6 +137,32 @@ async def test_unreachable_router_makes_entities_unavailable(
     await entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
     assert hass.states.get(internet).state == "on"
+
+
+async def test_failing_endpoint_is_retried_next_poll(
+    hass: HomeAssistant, entry: MockConfigEntry, router: FakeRouter
+) -> None:
+    """An endpoint that fails while the router's API struggles is not given up on."""
+    connected = entity_id(hass, "sensor", f"{SERIAL}_connected_devices")
+    router.fail_paths["/api/v1/hosts"] = SagemcomBusyError("GET /api/v1/hosts: HTTP 503")
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    router.fail_paths.clear()
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(connected).state == "4"
+
+
+async def test_failing_router_api_does_not_start_reauth(
+    hass: HomeAssistant, entry: MockConfigEntry, router: FakeRouter
+) -> None:
+    internet = entity_id(hass, "binary_sensor", f"{SERIAL}_internet")
+    router.fail_get = SagemcomBusyError("GET /api/v1/deviceInfo: HTTP 400")
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(internet).state == STATE_UNAVAILABLE
+    assert hass.config_entries.flow.async_progress() == []
 
 
 async def test_expired_credentials_start_reauth(
