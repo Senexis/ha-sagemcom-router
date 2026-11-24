@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import secrets
+import time
 from typing import Any
 from urllib.parse import urlencode
 
@@ -42,6 +43,11 @@ _CRYPT_ORDER = (
 
 CSRF_COOKIE = "__Host-csrf_token"
 CSRF_HEADER = "X-CSRF-Token"
+
+# The router's API degrades after a session has been in use for many hours
+# (bare 400 pages and 503s for every client, also without login) and recovers
+# as soon as that session is logged out. Start a fresh one well before that.
+SESSION_MAX_AGE = 3600.0
 
 # Keys whose values must never leave the client (Wi-Fi passphrases etc.).
 _SENSITIVE_KEY_PARTS = ("password", "passphrase", "secret", "psk")
@@ -199,6 +205,7 @@ class SagemcomRestClient:
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._lock = asyncio.Lock()
         self._logged_in = False
+        self._login_at = 0.0
 
     @property
     def host(self) -> str:
@@ -283,6 +290,7 @@ class SagemcomRestClient:
         )
         if status in (200, 204):
             self._logged_in = True
+            self._login_at = time.monotonic()
             _LOGGER.debug("Logged in to %s", self.host)
             return
         if status >= 500 or (status == 400 and not _api_exception(text)):
@@ -330,22 +338,30 @@ class SagemcomRestClient:
     ) -> tuple[int, str]:
         """Send a request with the session, logging in again once if it expired.
 
-        Logs in again only when the router confirms the session is gone. When
-        its API is failing instead, a new login would just add another open
-        session, so that raises SagemcomBusyError.
+        Logs in again right away only when the router confirms the session is
+        gone. When its API is failing instead, the session is logged out (which
+        is what makes the router recover) and SagemcomBusyError is raised; the
+        next request starts a new session.
         """
         async with self._lock:
+            if self._logged_in and time.monotonic() - self._login_at > SESSION_MAX_AGE:
+                _LOGGER.debug("Starting a fresh session")
+                await self._login_locked()
             if not self._logged_in:
                 await self._login_locked()
             status, text = await self._raw(method, path, body, timeout)
             if status in (400, 401, 403):
                 state = await self._session_state()
-                if state is None:
-                    raise _failure(method, path, status, text)
                 if state is False:
                     _LOGGER.debug("Session expired, logging in again")
                     await self._login_locked()
                     status, text = await self._raw(method, path, body, timeout)
+                elif state is None:
+                    await self._drop_session()
+                    raise _failure(method, path, status, text)
+            if status >= 500 or (status == 400 and not _api_exception(text)):
+                await self._drop_session()
+                raise _failure(method, path, status, text)
         return status, text
 
     # ------------------------------------------------------------------ api

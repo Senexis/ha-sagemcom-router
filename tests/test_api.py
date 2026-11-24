@@ -191,7 +191,51 @@ async def test_failing_router_api_does_not_log_in_again(
     await client.login()
     with pytest.raises(api.SagemcomBusyError):
         await client.get("/api/v1/deviceInfo")
+    calls = _calls(aioclient_mock)
+    assert calls.count("POST /api/v1/login") == 1
+    # Logging the session out is what lets the router recover.
+    assert calls[-1] == "POST /api/v1/logout"
+
+
+async def test_next_request_after_failure_starts_new_session(
+    client, aioclient_mock: AiohttpClientMocker
+) -> None:
+    responses = iter([503, 200])
+
+    async def _info(method, url, data):
+        status = next(responses)
+        if status == 503:
+            return AiohttpClientMockResponse(method, url, status=503, text="<html>503</html>")
+        return AiohttpClientMockResponse(method, url, json=[{"serialNumber": "X"}])
+
+    aioclient_mock.get(f"{BASE}/api/v1/deviceInfo", side_effect=_info)
+    with pytest.raises(api.SagemcomBusyError):
+        await client.get("/api/v1/deviceInfo")
+    assert await client.get("/api/v1/deviceInfo") == [{"serialNumber": "X"}]
+    assert _calls(aioclient_mock).count("POST /api/v1/login") == 2
+
+
+async def test_session_is_renewed_after_an_hour(
+    client, aioclient_mock: AiohttpClientMocker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: now[0])
+    aioclient_mock.get(f"{BASE}/api/v1/hosts", json={"ok": 1})
+    await client.get("/api/v1/hosts")
+    now[0] += api.SESSION_MAX_AGE - 1
+    await client.get("/api/v1/hosts")
     assert _calls(aioclient_mock).count("POST /api/v1/login") == 1
+
+    now[0] += 2
+    await client.get("/api/v1/hosts")
+    calls = _calls(aioclient_mock)
+    assert calls.count("POST /api/v1/login") == 2
+    assert calls[-4:] == [
+        "POST /api/v1/logout",
+        "POST /api/v2/login-params",
+        "POST /api/v1/login",
+        "GET /api/v1/hosts",
+    ]
 
 
 async def test_login_on_failing_router_is_not_an_auth_error(
