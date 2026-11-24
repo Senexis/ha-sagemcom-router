@@ -23,6 +23,7 @@ from .api import (
     SagemcomEndpointError,
     SagemcomError,
     SagemcomRestClient,
+    scrub,
     unwrap,
 )
 from .const import BANDS, DOMAIN, SLOW_INTERVAL
@@ -51,10 +52,42 @@ def _slow_paths() -> dict[str, str]:
     }
     for band, ident in BANDS.items():
         paths[f"wifi_{band}"] = f"/api/v2/wireless/{ident}"
+    # For the guest network's QR code (the main network's comes from wifi_2.4).
+    paths["guest_wifi_2.4"] = "/api/v2/wireless/guest24"
     return paths
 
 
 SLOW_PATHS = _slow_paths()
+# Slow-tier responses that hold a network's passphrase, read for the Wi-Fi QR
+# codes before the response is scrubbed.
+CREDENTIAL_KEYS = {"wifi_2.4": "main", "guest_wifi_2.4": "guest"}
+
+
+@dataclass(frozen=True)
+class WifiCredentials:
+    """What a phone needs to join a network. Kept out of RouterData and
+    diagnostics; only the QR code images use it."""
+
+    ssid: str
+    passphrase: str
+    protocol: str
+    hidden: bool
+    enabled: bool
+
+
+def wifi_credentials(data: Any) -> WifiCredentials | None:
+    ssid = _dig(unwrap(data), "wireless", "ssid", default={})
+    name = ssid.get("id")
+    if not name:
+        return None
+    security = ssid.get("security") or {}
+    return WifiCredentials(
+        ssid=name,
+        passphrase=str(security.get("passphrase") or ""),
+        protocol=str(security.get("protocol") or ""),
+        hidden=bool(ssid.get("hidden")),
+        enabled=bool(ssid.get("enable")),
+    )
 MESH_V4 = "/api/v4/easymesh/meshdevices"
 
 
@@ -153,14 +186,17 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         self._known_clients: set[str] | None = None
         self.platforms: list[str] = []  # set up by async_setup_entry
         self._prev_counters: tuple[float, int, int] | None = None
+        self.wifi_credentials: dict[str, WifiCredentials] = {}
 
     # ------------------------------------------------------------ fetching
-    async def _fetch(self, path: str, timeout: float | None = None) -> Any:
+    async def _fetch(
+        self, path: str, timeout: float | None = None, *, sanitize: bool = True
+    ) -> Any:
         """GET an optional endpoint; None if unsupported or it failed this time."""
         if path in self._unsupported:
             return None
         try:
-            return await self.client.get(path, timeout=timeout)
+            return await self.client.get(path, timeout=timeout, sanitize=sanitize)
         except SagemcomEndpointError as err:
             _LOGGER.debug("Endpoint unavailable, skipping from now on: %s", err)
             self._unsupported.add(path)
@@ -233,7 +269,13 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
             for key, path in SLOW_PATHS.items():
                 if key == "mesh_v2" and MESH_V4 not in self._unsupported:
                     continue
-                cache[key] = await self._fetch(path, timeout=60)
+                if key in CREDENTIAL_KEYS:
+                    data = await self._fetch(path, timeout=60, sanitize=False)
+                    if data is not None and (creds := wifi_credentials(data)):
+                        self.wifi_credentials[CREDENTIAL_KEYS[key]] = creds
+                    cache[key] = scrub(data)
+                else:
+                    cache[key] = await self._fetch(path, timeout=60)
         except SagemcomError as err:  # e.g. re-login failed; the next poll reports it
             _LOGGER.debug("Slow endpoints skipped this cycle: %s", err)
             return

@@ -36,6 +36,7 @@ PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.DEVICE_TRACKER,
     Platform.EVENT,
+    Platform.IMAGE,
     Platform.SENSOR,
 ]
 # Only set up when "Enable controls" is on: these entities change router settings.

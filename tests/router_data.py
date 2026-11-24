@@ -14,6 +14,8 @@ EXTENDER_ID = "02:00:00:00:00:02"
 PHONE = "02:00:00:00:10:01"  # Wi-Fi 5 GHz via the gateway
 PLUG = "02:00:00:00:10:02"  # Wi-Fi 2.4 GHz via the extender
 NAS = "02:00:00:00:10:03"  # wired, behind the 10G port
+MAIN_PSK = "main-passphrase-1"
+GUEST_PSK = "guest;pass:2"  # needs escaping in the QR text
 GUEST = "02:00:00:00:10:04"  # guest network, no station info
 OLD = "02:00:00:00:10:05"  # offline
 
@@ -30,6 +32,7 @@ PATHS: dict[str, str] = {
     "wifi_stats_5": "/api/v2/wireless/stats/5",
     "wifi_2.4": "/api/v2/wireless/24",
     "wifi_5": "/api/v2/wireless/5",
+    "guest_wifi_2.4": "/api/v2/wireless/guest24",
     "led": "/api/v1/led",
     "parental": "/api/v1/parental_control",
     "dhcp_clients": "/api/v1/dhcp/clients",
@@ -67,7 +70,31 @@ def raw(rx_bytes: int = 1_000_000_000, tx_bytes: int = 100_000_000) -> dict[str,
         "lan_stats": [{"lan": {"interfaces": []}}],
         "wifi_stats_2.4": [{"wireless": {"ssid": {"status": "Up", "stats": {}}}}],
         "wifi_stats_5": [{"wireless": {"ssid": {"status": "Up", "stats": {}}}}],
-        "wifi_2.4": [{"wireless": {"radio": {"enable": True, "channel": "6"}, "ssid": {"id": "TestNet"}}}],
+        "wifi_2.4": [
+            {
+                "wireless": {
+                    "radio": {"enable": True, "channel": "6"},
+                    "ssid": {
+                        "id": "TestNet",
+                        "enable": True,
+                        "hidden": False,
+                        "security": {"protocol": "WPA3-Personal-Transition", "passphrase": MAIN_PSK},
+                    },
+                }
+            }
+        ],
+        "guest_wifi_2.4": [
+            {
+                "wireless": {
+                    "ssid": {
+                        "id": "TestGuest",
+                        "enable": False,
+                        "hidden": False,
+                        "security": {"protocol": "WPA2-Personal", "passphrase": GUEST_PSK},
+                    }
+                }
+            }
+        ],
         "wifi_5": [{"wireless": {"radio": {"enable": True, "channel": "36"}, "ssid": {"id": "TestNet"}}}],
         "hosts": [
             {

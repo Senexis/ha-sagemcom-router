@@ -35,6 +35,11 @@ The router and its network clients are shown in separate groups ("Router" and
   seen before (also for clients that joined while HA was down), with mac, name,
   hostname, ip, connection, band and network (main/guest). Use it as an automation
   trigger, e.g. to notify about unknown devices.
+- **Guest Wi-Fi QR code** and **Wi-Fi QR code** images: scan with a phone camera
+  to join the network (put them on a dashboard with a picture-entity card). The
+  passphrase is only in the image, never in states, attributes or diagnostics.
+  The main network's code is disabled by default; enable it if everyone who can
+  see your dashboards may know the Wi-Fi password.
 - **Mesh extenders** get their own device (connected via the router) with
   Connected, Wi-Fi clients, Backhaul and Last boot (disabled by default). Built
   from the API format only; not yet verified on a real extender.
