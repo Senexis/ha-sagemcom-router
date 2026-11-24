@@ -262,6 +262,12 @@ class SagemcomRestClient:
         # End the old session first: the router keeps sessions open until they
         # time out, and too many of them break its API.
         await self._drop_session()
+        # Don't open a session while the API is failing: a logout may then fail
+        # too and leave the session behind, which keeps the router stuck.
+        # /api/v1/open needs no login, so it shows the state without one.
+        status, text = await self._raw("GET", "/api/v1/open")
+        if status >= 500 or (status == 400 and not _api_exception(text)):
+            raise _failure("GET", "/api/v1/open", status, text)
         status, text = await self._raw(
             "POST", "/api/v2/login-params", {"login": self._username}
         )

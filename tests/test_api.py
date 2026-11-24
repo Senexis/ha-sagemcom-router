@@ -75,6 +75,7 @@ async def session(
 
 @pytest.fixture
 def client(session: ClientSession, aioclient_mock: AiohttpClientMocker) -> api.SagemcomRestClient:
+    aioclient_mock.get(f"{BASE}/api/v1/open", json=[{"wan_status": "Up"}])
     aioclient_mock.post(f"{BASE}/api/v2/login-params", json=[{"salt": "abc", "nonce": "n0"}])
     aioclient_mock.post(f"{BASE}/api/v1/login", status=204)
     aioclient_mock.post(f"{BASE}/api/v1/logout", status=204)
@@ -87,8 +88,8 @@ def _calls(aioclient_mock: AiohttpClientMocker) -> list[str]:
 
 async def test_login_sends_digest(client, aioclient_mock: AiohttpClientMocker) -> None:
     await client.login()
-    _, _, params, _ = aioclient_mock.mock_calls[0]
-    _, _, login, _ = aioclient_mock.mock_calls[1]
+    _, _, params, _ = aioclient_mock.mock_calls[1]  # [0] is the /open check
+    _, _, login, _ = aioclient_mock.mock_calls[2]
     assert params == "login=admin"
     fields = dict(part.split("=") for part in login.split("&"))
     assert fields["login"] == "admin"
@@ -101,6 +102,7 @@ async def test_login_sends_digest(client, aioclient_mock: AiohttpClientMocker) -
 
 
 async def test_login_rejected(session: ClientSession, aioclient_mock: AiohttpClientMocker) -> None:
+    aioclient_mock.get(f"{BASE}/api/v1/open", json=[{"wan_status": "Up"}])
     aioclient_mock.post(f"{BASE}/api/v2/login-params", json=[{"salt": "abc", "nonce": "n0"}])
     aioclient_mock.post(f"{BASE}/api/v1/login", status=401)
     client = api.SagemcomRestClient(session, "192.0.2.1", "a", "b")
@@ -115,6 +117,7 @@ async def test_get_logs_in_and_scrubs(client, aioclient_mock: AiohttpClientMocke
     data = await client.get("/api/v2/wireless/5")
     assert data == [{"wireless": {"ssid": {"id": "Net"}}}]
     assert _calls(aioclient_mock) == [
+        "GET /api/v1/open",
         "POST /api/v2/login-params",
         "POST /api/v1/login",
         "GET /api/v2/wireless/5",
@@ -133,10 +136,11 @@ async def test_get_relogs_in_when_session_expired(
     aioclient_mock.get(f"{BASE}/api/v1/authenticated", json={"authenticated": False})
     await client.login()
     assert await client.get("/api/v1/hosts") == {"ok": 1}
-    assert _calls(aioclient_mock)[2:] == [
+    assert _calls(aioclient_mock)[3:] == [
         "GET /api/v1/hosts",
         "GET /api/v1/authenticated",
         "POST /api/v1/logout",  # the old session is ended, not left open
+        "GET /api/v1/open",
         "POST /api/v2/login-params",
         "POST /api/v1/login",
         "GET /api/v1/hosts",
@@ -230,8 +234,9 @@ async def test_session_is_renewed_after_an_hour(
     await client.get("/api/v1/hosts")
     calls = _calls(aioclient_mock)
     assert calls.count("POST /api/v1/login") == 2
-    assert calls[-4:] == [
+    assert calls[-5:] == [
         "POST /api/v1/logout",
+        "GET /api/v1/open",
         "POST /api/v2/login-params",
         "POST /api/v1/login",
         "GET /api/v1/hosts",
@@ -242,6 +247,7 @@ async def test_login_on_failing_router_is_not_an_auth_error(
     session: ClientSession, aioclient_mock: AiohttpClientMocker
 ) -> None:
     """A bare 400 page at login must not start a reauth flow."""
+    aioclient_mock.get(f"{BASE}/api/v1/open", json=[{"wan_status": "Up"}])
     aioclient_mock.post(f"{BASE}/api/v2/login-params", json=[{"salt": "abc", "nonce": "n0"}])
     aioclient_mock.post(f"{BASE}/api/v1/login", status=400, text="400 Bad Request")
     client = api.SagemcomRestClient(session, "192.0.2.1", "admin", "pw")
@@ -279,3 +285,14 @@ async def test_logout_only_when_logged_in(client, aioclient_mock: AiohttpClientM
     await client.login()
     await client.logout()
     assert _calls(aioclient_mock)[-1] == "POST /api/v1/logout"
+
+
+async def test_no_login_while_router_api_fails(
+    session: ClientSession, aioclient_mock: AiohttpClientMocker
+) -> None:
+    """While even /api/v1/open fails, no session is opened (it could be left behind)."""
+    aioclient_mock.get(f"{BASE}/api/v1/open", status=400, text="400 Bad Request")
+    client = api.SagemcomRestClient(session, "192.0.2.1", "admin", "pw")
+    with pytest.raises(api.SagemcomBusyError):
+        await client.get("/api/v1/deviceInfo")
+    assert _calls(aioclient_mock) == ["GET /api/v1/open"]

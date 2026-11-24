@@ -7,8 +7,14 @@ from types import MappingProxyType
 from aiohttp import CookieJar
 
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME, Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    EVENT_HOMEASSISTANT_STOP,
+    Platform,
+)
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
@@ -99,8 +105,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: SagemcomConfigEntry) -> 
         client,
         entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
     )
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except Exception:
+        await client.logout()  # a retry makes a new client; don't leave this session open
+        raise
     entry.runtime_data = coordinator
+
+    async def _logout_on_stop(_event: Event) -> None:
+        # HA doesn't unload entries when it stops; without this every restart
+        # leaves a session open on the router.
+        await client.logout()
+
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _logout_on_stop)
+    )
     _async_setup_subentries(hass, entry, coordinator)
 
     coordinator.platforms = _platforms(entry)

@@ -6,6 +6,7 @@ import pytest
 from pytest_homeassistant.common import MockConfigEntry
 
 from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -48,6 +49,27 @@ async def test_setup_and_unload(
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert entry.state is ConfigEntryState.NOT_LOADED
     assert router.logouts == 1  # frees the router's web session
+
+
+async def test_logout_when_home_assistant_stops(
+    hass: HomeAssistant, entry: MockConfigEntry, router: FakeRouter
+) -> None:
+    """A restart must not leave the session open on the router."""
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert router.logouts == 1
+
+
+async def test_logout_when_first_refresh_fails(
+    hass: HomeAssistant, router: FakeRouter
+) -> None:
+    router.fail_get = SagemcomConnectionError("timeout")
+    entry = make_entry()
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert router.logouts == router.logins == 1
 
 
 async def test_router_and_clients_in_own_subentries(
