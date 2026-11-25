@@ -7,7 +7,7 @@ from pytest_homeassistant.common import MockConfigEntry
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
@@ -185,6 +185,47 @@ async def test_failing_router_api_does_not_start_reauth(
     await hass.async_block_till_done()
     assert hass.states.get(internet).state == STATE_UNAVAILABLE
     assert hass.config_entries.flow.async_progress() == []
+    assert router.logouts == 1  # nothing worked: the next poll starts a new session
+
+
+async def test_clients_keep_updating_while_device_info_fails(
+    hass: HomeAssistant, entry: MockConfigEntry, router: FakeRouter
+) -> None:
+    """The router's API fails deviceInfo for an hour or more while /hosts works."""
+    internet = entity_id(hass, "binary_sensor", f"{SERIAL}_internet")
+    connected = entity_id(hass, "sensor", f"{SERIAL}_connected_devices")
+    coordinator = entry.runtime_data
+    router.fail_paths["/api/v1/deviceInfo"] = SagemcomBusyError(
+        "GET /api/v1/deviceInfo: HTTP 400"
+    )
+    next(h for h in router.raw["hosts"][0]["hosts"]["list"] if h["active"])["active"] = False
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success
+    assert hass.states.get(connected).state == "3"  # clients still update
+    assert hass.states.get(internet).state == STATE_UNKNOWN  # not "off"
+    assert coordinator.data.info["serial"] == SERIAL
+    assert router.logouts == 0
+
+    router.fail_paths.clear()
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(internet).state == "on"
+
+
+async def test_device_info_failing_at_setup_retries(
+    hass: HomeAssistant, router: FakeRouter
+) -> None:
+    """Without a first deviceInfo there is no serial to create entities with."""
+    router.fail_paths["/api/v1/deviceInfo"] = SagemcomBusyError(
+        "GET /api/v1/deviceInfo: HTTP 400"
+    )
+    entry = make_entry()
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
 
 
 async def test_expired_credentials_start_reauth(

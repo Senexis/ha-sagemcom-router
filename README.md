@@ -86,6 +86,11 @@ not exposed.
 - Writes use flat form-encoded bodies (like the web UI), booleans as `true`/`false`,
   guest SSID `enable` as `1`/`0`. Reads stay GET-only. The client logs out on
   unload, because the router has a limited number of web sessions.
+- The F5598T's API regularly fails for an hour or more (seen every ~10 hours):
+  most endpoints answer a bare `400 Bad Request` page, while `/api/v1/hosts`,
+  `/api/v1/session-count` and the v4 mesh endpoint keep working with the same
+  session. The integration then keeps updating the clients (trackers, counts,
+  mesh) and shows the other values as unknown until the router recovers.
 
 Host, username, password and SSL verification can be changed later with
 **Reconfigure** on the integration page (it refuses a different router).

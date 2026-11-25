@@ -167,12 +167,12 @@ async def test_unsupported_endpoint(
 async def test_expired_session_detected_from_api_error(
     client, aioclient_mock: AiohttpClientMocker
 ) -> None:
-    """Without a session the router answers /authenticated with its JSON 400."""
+    """Without a session the router answers with its JSON 400, /authenticated too."""
     responses = iter([400, 200])
 
     async def _info(method, url, data):
         if next(responses) == 400:
-            return AiohttpClientMockResponse(method, url, status=400, text="400 Bad Request")
+            return AiohttpClientMockResponse(method, url, status=400, json=API_EXCEPTION)
         return AiohttpClientMockResponse(method, url, json=[{"serialNumber": "X"}])
 
     aioclient_mock.get(f"{BASE}/api/v1/deviceInfo", side_effect=_info)
@@ -186,37 +186,36 @@ async def test_expired_session_detected_from_api_error(
     ("status", "text"),
     [(400, "400 Bad Request"), (503, "<html>503 Service Unavailable</html>")],
 )
-async def test_failing_router_api_does_not_log_in_again(
+async def test_failing_endpoint_keeps_the_session(
     client, aioclient_mock: AiohttpClientMocker, status: int, text: str
 ) -> None:
-    """A failing web service is not an expired session: no new login piles up."""
+    """A failing part of the web service is not an expired session.
+
+    The router fails some endpoints for over an hour while others keep working
+    with the same session, so there is no logout and no new login.
+    """
     aioclient_mock.get(f"{BASE}/api/v1/deviceInfo", status=status, text=text)
-    aioclient_mock.get(f"{BASE}/api/v1/authenticated", status=503, text="<html>503</html>")
+    aioclient_mock.get(f"{BASE}/api/v1/hosts", json=[{"hosts": {}}])
     await client.login()
     with pytest.raises(api.SagemcomBusyError):
         await client.get("/api/v1/deviceInfo")
+    assert await client.get("/api/v1/hosts") == [{"hosts": {}}]
     calls = _calls(aioclient_mock)
     assert calls.count("POST /api/v1/login") == 1
-    # Logging the session out is what lets the router recover.
-    assert calls[-1] == "POST /api/v1/logout"
+    assert "POST /api/v1/logout" not in calls
+    assert "GET /api/v1/authenticated" not in calls
 
 
-async def test_next_request_after_failure_starts_new_session(
+async def test_api_error_with_unknown_session_state_is_busy(
     client, aioclient_mock: AiohttpClientMocker
 ) -> None:
-    responses = iter([503, 200])
-
-    async def _info(method, url, data):
-        status = next(responses)
-        if status == 503:
-            return AiohttpClientMockResponse(method, url, status=503, text="<html>503</html>")
-        return AiohttpClientMockResponse(method, url, json=[{"serialNumber": "X"}])
-
-    aioclient_mock.get(f"{BASE}/api/v1/deviceInfo", side_effect=_info)
+    """If /authenticated fails too, the endpoint isn't written off as unsupported."""
+    aioclient_mock.get(f"{BASE}/api/v1/deviceInfo", status=400, json=API_EXCEPTION)
+    aioclient_mock.get(f"{BASE}/api/v1/authenticated", status=400, text="400 Bad Request")
+    await client.login()
     with pytest.raises(api.SagemcomBusyError):
         await client.get("/api/v1/deviceInfo")
-    assert await client.get("/api/v1/deviceInfo") == [{"serialNumber": "X"}]
-    assert _calls(aioclient_mock).count("POST /api/v1/login") == 2
+    assert _calls(aioclient_mock).count("POST /api/v1/login") == 1
 
 
 async def test_session_is_renewed_after_an_hour(

@@ -187,6 +187,7 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         self.platforms: list[str] = []  # set up by async_setup_entry
         self._prev_counters: tuple[float, int, int] | None = None
         self.wifi_credentials: dict[str, WifiCredentials] = {}
+        self._partial = False  # deviceInfo failing, clients still updated
 
     # ------------------------------------------------------------ fetching
     async def _fetch(
@@ -229,8 +230,17 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         return data
 
     async def _update(self) -> RouterData:
-        # Critical endpoint: failures here mark the whole update failed.
-        raw: dict[str, Any] = {"device_info": await self.client.get("/api/v1/deviceInfo")}
+        # The router's API regularly fails for an hour or more while /hosts and
+        # the mesh endpoint keep working. Then only deviceInfo-based data goes
+        # unknown; the update fails only when the client list fails too.
+        busy: SagemcomBusyError | None = None
+        try:
+            device_info = await self.client.get("/api/v1/deviceInfo")
+        except SagemcomBusyError as err:
+            if self.data is None:  # no identity (serial) to build entities on yet
+                raise
+            busy, device_info = err, None
+        raw: dict[str, Any] = {"device_info": device_info}
         # Cheap endpoints (~0.1-2 s each), every poll.
         fast = {
             "device": "/api/v1/device",
@@ -244,6 +254,19 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
             fast[f"wifi_stats_{band}"] = f"/api/v2/wireless/stats/{ident}"
         for key, path in fast.items():
             raw[key] = await self._fetch(path)
+        if busy is not None:
+            if raw.get("hosts") is None:
+                await self.client.logout()  # nothing works: start afresh next poll
+                raise busy
+            if not self._partial:
+                _LOGGER.warning(
+                    "Router API partly failing (%s); updating connected clients only "
+                    "until it recovers",
+                    busy,
+                )
+        elif self._partial:
+            _LOGGER.info("Router API recovered")
+        self._partial = busy is not None
 
         now = time.monotonic()
         if now >= self._slow_next and (self._slow_task is None or self._slow_task.done()):
@@ -296,10 +319,11 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
     # ------------------------------------------------------------- parsing
     def _parse(self, raw: dict[str, Any], now: float) -> RouterData:
         di = unwrap(raw["device_info"]) or {}
+        partial = raw["device_info"] is None  # deviceInfo failed this poll
         dev = _dig(unwrap(raw.get("device")), "device", default={})
         data = RouterData(raw=raw)
 
-        data.info = {
+        data.info = dict(self.data.info) if partial and self.data else {
             "serial": di.get("serialNumber") or dev.get("serialnumber"),
             "model": di.get("productClass") or dev.get("modelname"),
             "manufacturer": di.get("manufacturer") or "Sagemcom",
@@ -358,10 +382,14 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         open_ = raw.get("open") or {}
         data.wan = {
             "status": (open_.get("wan_status") or wan_ipv4.get("status") or (
+                None if partial else
                 "Up" if wan_eth.get("ethernetWanState") == "Up" and di.get("publicIpv4Address") else "Down"
             )),
-            "connected": bool(di.get("publicIpv4Address"))
-            and wan_eth.get("ethernetWanState", "Up") == "Up",
+            # Unknown, not "disconnected", while deviceInfo fails.
+            "connected": None if partial else (
+                bool(di.get("publicIpv4Address"))
+                and wan_eth.get("ethernetWanState", "Up") == "Up"
+            ),
             "ipv4": di.get("publicIpv4Address") or None,
             "ipv4_subnet": di.get("publicSubnetMask"),
             "ipv4_gateway": di.get("defaultGateway"),

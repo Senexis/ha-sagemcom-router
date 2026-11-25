@@ -345,9 +345,10 @@ class SagemcomRestClient:
         """Send a request with the session, logging in again once if it expired.
 
         Logs in again right away only when the router confirms the session is
-        gone. When its API is failing instead, the session is logged out (which
-        is what makes the router recover) and SagemcomBusyError is raised; the
-        next request starts a new session.
+        gone. A bare "400 Bad Request" page or a 5xx means that part of the
+        router's API is failing (it does so for over an hour at a time, while
+        other endpoints keep working with the same session): SagemcomBusyError
+        is raised and the session is kept.
         """
         async with self._lock:
             if self._logged_in and time.monotonic() - self._login_at > SESSION_MAX_AGE:
@@ -356,17 +357,17 @@ class SagemcomRestClient:
             if not self._logged_in:
                 await self._login_locked()
             status, text = await self._raw(method, path, body, timeout)
-            if status in (400, 401, 403):
+            if status in (401, 403) or (status == 400 and _api_exception(text)):
                 state = await self._session_state()
                 if state is False:
                     _LOGGER.debug("Session expired, logging in again")
                     await self._login_locked()
                     status, text = await self._raw(method, path, body, timeout)
                 elif state is None:
-                    await self._drop_session()
-                    raise _failure(method, path, status, text)
+                    raise SagemcomBusyError(
+                        f"{method} {path}: HTTP {status} (session state unknown)"
+                    )
             if status >= 500 or (status == 400 and not _api_exception(text)):
-                await self._drop_session()
                 raise _failure(method, path, status, text)
         return status, text
 
