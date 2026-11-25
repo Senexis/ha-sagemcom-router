@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 
@@ -212,6 +214,33 @@ async def test_clients_keep_updating_while_device_info_fails(
     await coordinator.async_refresh()
     await hass.async_block_till_done()
     assert hass.states.get(internet).state == "on"
+
+
+async def test_restart_while_device_info_fails(
+    hass: HomeAssistant, entry: MockConfigEntry, router: FakeRouter
+) -> None:
+    """After a restart during an outage the router's identity comes from the registry."""
+    connected = entity_id(hass, "sensor", f"{SERIAL}_connected_devices")
+    await hass.config_entries.async_unload(entry.entry_id)
+    router.fail_paths["/api/v1/deviceInfo"] = SagemcomBusyError(
+        "GET /api/v1/deviceInfo: HTTP 400"
+    )
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data.data.info["serial"] == SERIAL
+    assert hass.states.get(connected).state == "4"
+    device = dr.async_get(hass).async_get_device_by_identifier(
+        ("sagemcom_rest", SERIAL), entry.entry_id
+    )
+    assert device.model == "F0000T"  # not overwritten with None
+
+    router.fail_paths.clear()
+    with patch.object(hass.config_entries, "async_schedule_reload") as reload:
+        await entry.runtime_data.async_refresh()
+        await hass.async_block_till_done()
+    reload.assert_called_once_with(entry.entry_id)  # adds the Wi-Fi entities
 
 
 async def test_device_info_failing_at_setup_retries(

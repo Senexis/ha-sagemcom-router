@@ -188,6 +188,7 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         self._prev_counters: tuple[float, int, int] | None = None
         self.wifi_credentials: dict[str, WifiCredentials] = {}
         self._partial = False  # deviceInfo failing, clients still updated
+        self._started_partial = False  # set up while deviceInfo was failing
 
     # ------------------------------------------------------------ fetching
     async def _fetch(
@@ -237,8 +238,8 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         try:
             device_info = await self.client.get("/api/v1/deviceInfo")
         except SagemcomBusyError as err:
-            if self.data is None:  # no identity (serial) to build entities on yet
-                raise
+            if self.data is None and self._registry_info() is None:
+                raise  # first setup: no identity (serial) to build entities on yet
             busy, device_info = err, None
         raw: dict[str, Any] = {"device_info": device_info}
         # Cheap endpoints (~0.1-2 s each), every poll.
@@ -266,6 +267,12 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
                 )
         elif self._partial:
             _LOGGER.info("Router API recovered")
+            if self._started_partial:
+                # Entities that need deviceInfo (Wi-Fi bands, guest network)
+                # couldn't be created at setup; a reload adds them.
+                self.hass.config_entries.async_schedule_reload(self.config_entry.entry_id)
+        if busy is not None and self.data is None:
+            self._started_partial = True
         self._partial = busy is not None
 
         now = time.monotonic()
@@ -279,6 +286,26 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
             )
         raw.update(self._slow_cache)
         return self._parse(raw, now)
+
+    def _registry_info(self) -> dict[str, Any] | None:
+        """The router's identity as registered before, for setup during an outage."""
+        serial = self.config_entry.unique_id
+        device = serial and dr.async_get(self.hass).async_get_device_by_identifier(
+            (DOMAIN, serial), self.config_entry.entry_id
+        )
+        if not device:
+            return None
+        mac = next(
+            (v for kind, v in device.connections if kind == dr.CONNECTION_NETWORK_MAC), None
+        )
+        return {
+            "serial": serial,
+            "model": device.model,
+            "manufacturer": device.manufacturer,
+            "firmware": device.sw_version,
+            "hardware": device.hw_version,
+            "mac": mac,
+        }
 
     async def _refresh_slow(self) -> None:
         """Fetch slow-changing or expensive endpoints, then refresh entities."""
@@ -323,17 +350,20 @@ class SagemcomCoordinator(DataUpdateCoordinator[RouterData]):
         dev = _dig(unwrap(raw.get("device")), "device", default={})
         data = RouterData(raw=raw)
 
-        data.info = dict(self.data.info) if partial and self.data else {
-            "serial": di.get("serialNumber") or dev.get("serialnumber"),
-            "model": di.get("productClass") or dev.get("modelname"),
-            "manufacturer": di.get("manufacturer") or "Sagemcom",
-            "firmware": di.get("softwareVersion") or _dig(dev, "running", "version"),
-            "recovery_firmware": _dig(dev, "reco", "version"),
-            "hardware": di.get("hardwareVersion") or dev.get("hardware_version"),
-            "mac": di.get("macAddress"),
-            "kernel": di.get("kernelVersion"),
-            "architecture": di.get("architecture"),
-        }
+        if partial:
+            data.info = dict(self.data.info) if self.data else self._registry_info() or {}
+        else:
+            data.info = {
+                "serial": di.get("serialNumber") or dev.get("serialnumber"),
+                "model": di.get("productClass") or dev.get("modelname"),
+                "manufacturer": di.get("manufacturer") or "Sagemcom",
+                "firmware": di.get("softwareVersion") or _dig(dev, "running", "version"),
+                "recovery_firmware": _dig(dev, "reco", "version"),
+                "hardware": di.get("hardwareVersion") or dev.get("hardware_version"),
+                "mac": di.get("macAddress"),
+                "kernel": di.get("kernelVersion"),
+                "architecture": di.get("architecture"),
+            }
 
         mem_total = _int(di.get("totalMemory"))
         mem_free = _int(di.get("freeMemory"))
